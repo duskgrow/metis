@@ -27,14 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-      # zero-config binary cache; for stricter requirements switch to FlakeHub
-      # Cache or Cachix (see docs/decisions/0004)
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
-        with:
-          # otherwise the action probes FlakeHub Cache (the paid hosted sibling)
-          # whenever determinate-nixd is present, erroring noisily before
-          # falling back to the free GitHub Actions cache
-          use-flakehub: false
+      # Use cache.nixos.org directly; per-store-path GitHub caching repeatedly
+      # hit API rate limits and made successful runs emit cache warnings.
       # cargo registry + target/ cache. Not rust-cache: its key detection shells
       # out through `nix develop -c` (~75s of flake eval per job); a static key
       # over the lockfile + toolchain pin expresses the same identity instantly.
@@ -59,9 +53,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
-        with:
-          use-flakehub: false # see the quality-gate job
       # cargo registry + target/ cache; actions/cache over rust-cache for the
       # same reason as the quality-gate job (no `nix develop -c` detection tax)
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -100,8 +91,4 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
-        with:
-          use-flakehub: false # see the quality-gate job
       - run: nix develop -c just dist-check
-
