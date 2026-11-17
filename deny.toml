@@ -27,6 +27,7 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "zvariant 5.15.1 belongs to the zbus 5 D-Bus stack used by Linux accessibility and ashpd; moving to zbus 6 is an upstream upgrade" },
   { id = "RUSTSEC-2026-0371", reason = "zbus_names 4.3.5 belongs to the zbus 5 D-Bus stack used by Linux accessibility and ashpd; moving to zbus 6 is an upstream upgrade" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 5.15.1 belongs to the zbus 5 D-Bus stack used by Linux accessibility and ashpd; moving to zbus 6 is an upstream upgrade" },
+  { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 is pinned throughout GPUI's dependency graph; this INFO-only unmaintained exemption ends when GPUI migrates to jiff/time or chrono resumes maintenance" },
 ]
 
 [bans]

@@ -2,6 +2,10 @@
 /target
 **/*.rs.bk
 
+# JavaScript / TypeScript
+node_modules/
+packages/*/lib/
+
 # Nix / direnv
 /.direnv
 /result

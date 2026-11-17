@@ -54,6 +54,8 @@ Notes:
 2. Member crates inherit with `dep.workspace = true` and may only add `features` / `optional`;
 3. `just deny` enforces license and source policy; a new license requires a PR discussion before extending the `deny.toml` allow-list.
 
+JavaScript shared development-tool versions live in the root `package.json`; each package's runtime dependencies live in its own manifest. Generate `pnpm-lock.yaml` with pnpm and never hand-edit it. Review every dependency lifecycle script individually in `allowBuilds` in `pnpm-workspace.yaml`. `just deny` also runs the npm security audit and JavaScript license check.
+
 ## Adding a crate
 
 ```bash

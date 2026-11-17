@@ -5,7 +5,15 @@
 - DeepSeek Harness：[`39163dd30f703a79079e2d2446545cff3c453738`](https://github.com/deepseek-ai/deepseek-harness/tree/39163dd30f703a79079e2d2446545cff3c453738)，2026-11-13。
 - dsh-TUI：[`11c03aced529d9d26c5eb1003abb0834d28b8100`](https://github.com/ccch1mneyyy/dsh-TUI/tree/11c03aced529d9d26c5eb1003abb0834d28b8100)，2026-11-15。
 
-结论来自源码阅读，实际运行与安装验证安排在里程碑 0。
+下文分别记录源码结论与里程碑 0 的实际验证；尚未实测的能力仍以产品里程碑清单为准。
+
+## 首次运行验证
+
+2026-11-17 在当前 Linux x64 开发环境中，使用 npm 发布的 `@deepseek-ai/dsh@0.2.2-rc.3` 验证了最小插件链路：Metis 的 TypeScript 插件编译为 JS，通过公开 `--patch` 叠加层加载，随后 dsh 在本地回环地址和随机端口启动 Web 运行时。该测试使用隔离的 `DSH_HOME`，不需要模型凭据。
+
+Node.js 补丁版本会直接影响可用性。同一 dsh 在 Node.js 24.18.0 上通过验证，在 24.19.0 与 24.21.0 上均在插件加载前失败，错误来自 `node-addon-require-builtin` 对 Node/V8 私有布局的运行时探测。因此仓库通过 `.node-version` 固定已验证的 Node.js 版本，不能用上游的最低版本声明代替补丁版本验证。
+
+此次验证只覆盖最小插件加载和 Web 启动。真实模型会话、进程树清理、多客户端与重连、干净 NixOS 安装以及无显示发行包仍未验证。
 
 ## 接入方式
 

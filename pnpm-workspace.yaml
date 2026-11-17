@@ -1,0 +1,20 @@
+packages:
+  - packages/*
+
+# Security fixes for dependencies pinned by dsh. Narrow ranges leave later
+# releases untouched; remove a range when dsh no longer selects a vulnerable
+# release. The MCP client and core must move together.
+overrides:
+  'undici@>=8.0.0 <8.12.2': 8.12.2
+  'fflate@>=0.8.0 <0.8.3': 0.8.3
+  '@modelcontextprotocol/client@>=2.0.0 <2.3.0': 2.3.0
+  '@modelcontextprotocol/core@>=2.0.0 <2.3.0': 2.3.0
+
+# The milestone-0 plugin smoke test needs no dependency install scripts. Keep
+# these disabled until a verified runtime requirement and script review enable one.
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': false
+  '@google/genai': false
+  koffi: false
+  node-pty: false
+  protobufjs: false

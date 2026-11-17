@@ -1,0 +1,11 @@
+{
+  "name": "metis-workspace",
+  "private": true,
+  "packageManager": "pnpm@11.28.5",
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh": "0.2.2-rc.3",
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  }
+}

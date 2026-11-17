@@ -1,5 +1,5 @@
 {
-  description = "Rust project dev environment (toolchain SSOT lives in rust-toolchain.toml; this file only consumes it)";
+  description = "Metis development environment (Rust and Node toolchain versions live in their own pin files)";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -18,17 +18,20 @@
           overlays = [ rust-overlay.overlays.default ];
         };
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        node = pkgs.callPackage ./nix/node.nix { inherit system; };
       in
       {
         devShells.default = pkgs.mkShell {
           # Responsibility boundary: flake provides toolchains and ecosystem
-          # tools; language dependencies belong to cargo (Cargo.lock).
+          # tools; language dependencies belong to Cargo.lock / pnpm-lock.yaml.
           # No 2nix tooling (crane/naersk/...) in the dev shell.
           packages = [
             rustToolchain # cargo/rustc/rustfmt/clippy/rust-analyzer — version: rust-toolchain.toml
           ] ++ (with pkgs; [
             just # task-layer entry point
-            dprint # Markdown/TOML formatter (config: dprint.json)
+            node # dsh runtime — official binary, version: .node-version
+            pnpm # launcher only; the actual version comes from package.json packageManager
+            dprint # Markdown/TOML/TypeScript formatter (config: dprint.json)
             prek # git hook runner (reads .pre-commit-config.yaml)
             cargo-nextest # test runner (process isolation / sharding)
             cargo-insta # snapshot review
