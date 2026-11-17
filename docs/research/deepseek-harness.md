@@ -9,7 +9,7 @@
 
 ## 接入方式
 
-Metis 可以由主机服务管理 DeepSeek Harness Web 运行时，通过适配器接入会话、事件、审批和任务。Harness 保存智能体历史，Metis 保存主机、项目与会话之间的对应关系。
+Metis 通过 Cordis 插件和 profile 将项目、Git 以及主机／项目／会话映射加入固定版本的 Harness Web 运行时。工作台直接连接扩展后的 dsh，使用 Harness 的会话、事件、审批和任务能力。
 
 上游仍处于开发者预览阶段，集成需要固定版本，并用契约测试验证升级。
 
@@ -31,7 +31,7 @@ dsh-TUI 是独立发布的终端应用和适配层，不是 DeepSeek Harness 的
 
 它的独立入口可以在界面进程内加载 Harness，并复刻部分宿主启动逻辑，通过能力检查和源码指纹跟踪上游变化。[独立宿主设计](https://github.com/ccch1mneyyy/dsh-TUI/blob/11c03aced529d9d26c5eb1003abb0834d28b8100/docs/standalone-host-design.md) · [宿主契约](https://github.com/ccch1mneyyy/dsh-TUI/blob/11c03aced529d9d26c5eb1003abb0834d28b8100/ADAPTER.md#独立入口的宿主契约)
 
-Metis 的客户端与智能体生命周期不同，因此主要参考它的发行方案，会话仍由主机服务托管。
+Metis 主要参考它的插件与便携发行方案，会话与主机扩展由同一个 dsh 运行时承载。
 
 ## dsh-TUI 的发行方案
 
@@ -48,5 +48,5 @@ Windows 离线安装包还包含便携 Node.js、pnpm、Harness 和 dsh-TUI，�
 - 发布包同时携带 Harness、Node.js 和依赖，用户只安装 Metis。
 - 按 Metis 与 Harness 的版本组合隔离运行时缓存，并校验解压结果。
 - 固定依赖锁与运行时校验和，在干净 Linux、NixOS 和 macOS 环境中验证安装。
-- 通过公开 Web 接口接入 Harness，升级时只跟踪这一接口。
+- 验证公开插件和 Web 接口能否承载 Metis 扩展，升级时跟踪实际使用的接口。
 - 针对会话接续、提示词重试、审批、重启和运行时升级建立契约测试。

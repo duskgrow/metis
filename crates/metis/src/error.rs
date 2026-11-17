@@ -14,13 +14,31 @@ use thiserror::Error;
 /// public interface — removing or renaming one is a `SemVer`-breaking change.
 #[derive(Debug, Error, Diagnostic)]
 pub enum Error {
-    /// The name was empty or whitespace-only.
-    #[error("name must not be empty")]
+    /// The headless runtime entry point is not implemented yet.
+    #[error("Metis headless runtime is not implemented yet")]
     #[diagnostic(
-        code(metis::empty_name),
-        help("pass a non-empty name, e.g. `--name ferris`")
+        code(metis::runtime_unavailable),
+        help(
+            "use a build with the default `workbench` feature; the headless runtime is not implemented yet"
+        )
     )]
-    EmptyName,
+    RuntimeUnavailable,
+    /// The workbench was started without a graphical session.
+    #[error("no graphical session detected")]
+    #[diagnostic(
+        code(metis::display_unavailable),
+        help("start Metis from a Wayland or X11 desktop session")
+    )]
+    DisplayUnavailable,
+    /// GPUI failed while connecting to the graphical session.
+    #[error("failed to start the Metis workbench: {0}")]
+    #[diagnostic(
+        code(metis::workbench_startup),
+        help(
+            "verify that the Wayland or X11 session is reachable and its runtime libraries are installed"
+        )
+    )]
+    WorkbenchStartup(String),
 }
 
 /// Convenience alias for library results.

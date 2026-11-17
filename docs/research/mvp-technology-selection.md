@@ -1,6 +1,6 @@
 # MVP 技术选型调研
 
-本文记录 MVP 选型所依据的外部事实，调研日期为 2026-11-16。界面与通信决策分别见[架构决策记录 0006](../decisions/0006-use-gpui-kit-for-mvp-ui.md)和[0007](../decisions/0007-use-json-rpc-for-mvp-client-protocol.md)，验证标准见[里程碑 0](../product-scope.md#里程碑-0验证关键集成)。
+本文记录 MVP 选型所依据的外部事实，调研日期为 2026-11-16。界面与主机运行时决策分别见[架构决策记录 0006](../decisions/0006-use-gpui-kit-for-mvp-ui.md)和[0010](../decisions/0010-extend-harness-as-host-runtime.md)，验证标准见[里程碑 0](../product-scope.md#里程碑-0验证关键集成)。
 
 ## GPUI Kit 发布与组件
 

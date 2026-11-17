@@ -15,4 +15,4 @@ MVP 需要流式 Markdown、代码编辑和多文件差异审查。自行实现�
 
 ## 影响
 
-MVP 可以集中验证项目、会话和审批流程。这些界面依赖只进入工作台构建，Server 构建边界见[架构决策记录 0008](0008-provide-headless-and-workbench-builds.md)。GPUI Kit 及其固定的 GPUI 快照仍处于 `0.x` 阶段，升级需要独立审查并重新验证中文输入、编辑和差异视图。后续需要缩减包体时，优先裁剪 Tree-sitter 语法 feature。
+MVP 可以集中验证项目、会话和审批流程。这些界面依赖只进入工作台，无显示运行包边界见[架构决策记录 0010](0010-extend-harness-as-host-runtime.md)。GPUI Kit 及其固定的 GPUI 快照仍处于 `0.x` 阶段，升级需要独立审查并重新验证中文输入、编辑和差异视图。后续需要缩减包体时，优先裁剪 Tree-sitter 语法 feature。

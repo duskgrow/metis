@@ -1,12 +1,33 @@
 # cargo-deny dependency policy: advisories / licenses / bans / sources (`just deny`).
 # Docs: https://embarkstudios.github.io/cargo-deny/
+[graph]
+# Match the targets in dist-workspace.toml; ignore GPUI's unused mobile/web branches.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
+
 [advisories]
 yanked = "deny"
-# Every ignore is temporary and carries its removal trigger in a comment; the
-# fuse is `just deny`'s `-D advisory-not-detected`, which fails CI once the
-# advisory no longer matches any crate in the tree — the dependency-update PR
-# that clears the condition is the one that must delete the entry.
-ignore = []
+# Precise, reasoned exceptions for unmaintained upstream crates. These are
+# maintenance notices, not vulnerability advisories: every one of them is
+# pinned inside GPUI/Kits' own dependency graph and cannot be upgraded from
+# this workspace. Ignoring an ID only silences that specific advisory — any
+# new advisory (including a vulnerability) raised against the same crate still
+# fails the gate. `just deny`'s `-D advisory-not-detected` is the fuse: when
+# the affected crate leaves the graph or the advisory stops being reported,
+# CI fails and the entry must be deleted in that same PR.
+ignore = [
+  { id = "RUSTSEC-2024-0384", reason = "instant 0.1.13 is pulled in by gpui-base/gpui-component; replacing it with web-time requires an upstream GPUI change" },
+  { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 is used only for gpui-component's macro expansion; switching to the pastey fork is an upstream decision" },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1 arrives through fontdb/usvg in GPUI's text stack; migrating to skrifa is upstream work" },
+  { id = "RUSTSEC-2026-0206", reason = "rustybuzz 0.20.1 is pinned by GPUI's usvg/resvg 0.45 and 0.46; migrating to harfrust is upstream work" },
+  { id = "RUSTSEC-2026-0370", reason = "zvariant 5.15.1 belongs to the zbus 5 D-Bus stack used by Linux accessibility and ashpd; moving to zbus 6 is an upstream upgrade" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names 4.3.5 belongs to the zbus 5 D-Bus stack used by Linux accessibility and ashpd; moving to zbus 6 is an upstream upgrade" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 5.15.1 belongs to the zbus 5 D-Bus stack used by Linux accessibility and ashpd; moving to zbus 6 is an upstream upgrade" },
+]
 
 [bans]
 # New duplicate versions fail the check. The current exceptions are forced by
@@ -18,6 +39,65 @@ highlight = "all"
 skip = [
   { crate = "syn", version = "2", reason = "miette-derive and tracing-attributes still require syn 2 while other derive dependencies use syn 3" },
   { crate = "unicode-width", version = "0.1", reason = "miette requires unicode-width 0.1 while its textwrap dependency uses 0.2" },
+  { crate = "base64@0.22.1", reason = "GPUI's pinned resvg/reqwest stack uses 0.22 while rust-i18n uses 0.23" },
+  { crate = "bitflags@1.3.2", reason = "GPUI's LSP, rust-i18n and PNG stack still use 1.x while platform crates use 2.x" },
+  { crate = "block-buffer@0.10.4", reason = "GPUI platform crypto dependencies use digest 0.10 alongside newer 0.11" },
+  { crate = "cpufeatures@0.2.17", reason = "GPUI platform crypto dependencies span sha2 0.10 and 0.11" },
+  { crate = "crypto-common@0.1.7", reason = "GPUI platform crypto dependencies span digest 0.10 and 0.11" },
+  { crate = "digest@0.10.7", reason = "GPUI platform crypto dependencies require 0.10 alongside 0.11" },
+  { crate = "dirs@5.0.1", reason = "GPUI font support uses dirs 5 while embedded assets use dirs 6" },
+  { crate = "dirs-sys@0.4.1", reason = "GPUI font support uses dirs-sys 0.4 while embedded assets use 0.5" },
+  { crate = "font-types@0.11.3", reason = "GPUI font stack currently spans read-fonts 0.37 and 0.41" },
+  { crate = "getrandom@0.2.17", reason = "GPUI XIM's const-random stack requires 0.2 alongside newer platform dependencies" },
+  { crate = "getrandom@0.3.4", reason = "GPUI rand 0.9 stack uses 0.3 alongside accessibility stack 0.4" },
+  { crate = "gif@0.13.3", reason = "GPUI Component resvg uses 0.13 while GPUI image stack uses 0.14" },
+  { crate = "hashbrown@0.14.5", reason = "GPUI XIM pins 0.14 alongside accessibility and newer collections stacks" },
+  { crate = "hashbrown@0.16.1", reason = "GPUI accessibility and wgpu allocator use 0.16 alongside Kit's collections 0.17" },
+  { crate = "heck@0.4.1", reason = "GPUI Apple build tooling uses heck 0.4 while other macros use 0.5" },
+  { crate = "imagesize@0.13.0", reason = "GPUI Component resvg uses 0.13 alongside GPUI's usvg 0.14" },
+  { crate = "itertools@0.11.0", reason = "GPUI localization uses itertools 0.11 alongside 0.13 and 0.14" },
+  { crate = "itertools@0.13.0", reason = "GPUI Base uses itertools 0.13 while its pinned GPUI snapshot uses 0.14" },
+  { crate = "kurbo@0.11.3", reason = "GPUI Component's resvg stack pins kurbo 0.11" },
+  { crate = "miniz_oxide@0.8.9", reason = "GPUI image decoder exr uses 0.8 alongside newer compression users" },
+  { crate = "objc2@0.5.3", reason = "GPUI macOS dependencies span objc2 0.5 and 0.6" },
+  { crate = "objc2-app-kit@0.2.2", reason = "GPUI macOS dependencies span objc2-app-kit 0.2 and 0.3" },
+  { crate = "objc2-foundation@0.2.2", reason = "GPUI macOS dependencies span objc2-foundation 0.2 and 0.3" },
+  { crate = "phf@0.11.3", reason = "GPUI font and syntax crates use phf 0.11 alongside 0.13" },
+  { crate = "phf_generator@0.11.3", reason = "GPUI font and syntax crates use phf_generator 0.11 alongside 0.13" },
+  { crate = "phf_shared@0.11.3", reason = "GPUI font and syntax crates use phf_shared 0.11 alongside 0.13" },
+  { crate = "png@0.17.16", reason = "GPUI resvg uses png 0.17 alongside current image stack" },
+  { crate = "rand@0.8.8", reason = "GPUI platform dependencies require rand 0.8 and 0.9" },
+  { crate = "rand_core@0.6.4", reason = "GPUI platform dependencies require rand_core 0.6 and 0.9" },
+  { crate = "read-fonts@0.37.0", reason = "GPUI text shaping dependencies span read-fonts 0.37 and 0.41" },
+  { crate = "resvg@0.45.1", reason = "GPUI Component pins resvg 0.45 while GPUI pins 0.46" },
+  { crate = "roxmltree@0.20.0", reason = "GPUI Component's SVG stack pins roxmltree 0.20" },
+  { crate = "rustc-hash@1.1.0", reason = "GPUI's parser/font stack includes consumers pinned to rustc-hash 1.x" },
+  { crate = "serde_spanned@0.6.9", reason = "GPUI dependencies span TOML 0.8 and 1.x" },
+  { crate = "sha2@0.10.9", reason = "GPUI platform crypto uses sha2 0.10 alongside 0.11" },
+  { crate = "skrifa@0.40.0", reason = "GPUI text stack spans skrifa 0.40 and 0.44" },
+  { crate = "spin@0.9.9", reason = "GPUI image/platform dependencies pin spin 0.9 alongside 0.10" },
+  { crate = "svgtypes@0.15.3", reason = "GPUI Component's SVG stack pins svgtypes 0.15" },
+  { crate = "thiserror@1.0.69", reason = "GPUI upstream snapshot uses thiserror 1 while Kit uses 2" },
+  { crate = "thiserror-impl@1.0.69", reason = "GPUI upstream snapshot uses thiserror-impl 1 while Kit uses 2" },
+  { crate = "toml@0.8.23", reason = "GPUI dependencies span TOML 0.8 and 1.x" },
+  { crate = "toml_datetime@0.6.11", reason = "GPUI dependencies span toml_datetime 0.6 and 1.x" },
+  { crate = "toml_edit@0.22.27", reason = "GPUI dependencies span toml_edit 0.22 and 0.25" },
+  { crate = "usvg@0.45.1", reason = "GPUI Component pins usvg 0.45 while GPUI pins 0.46" },
+  { crate = "windows@0.58.0", reason = "GPUI Windows platform stack spans windows 0.58 and 0.62" },
+  { crate = "windows-core@0.58.0", reason = "GPUI Windows platform stack spans windows-core 0.58 and 0.62" },
+  { crate = "windows-implement@0.58.0", reason = "GPUI Windows platform stack spans windows-implement 0.58 and 0.60" },
+  { crate = "windows-interface@0.58.0", reason = "GPUI Windows platform stack spans windows-interface 0.58 and 0.59" },
+  { crate = "windows-result@0.2.0", reason = "GPUI Windows dependencies span windows-result 0.2 and 0.4" },
+  { crate = "windows-strings@0.1.0", reason = "GPUI Windows dependencies span windows-strings 0.1 and 0.5" },
+  { crate = "windows-sys@0.48.0", reason = "GPUI Windows dependencies span windows-sys 0.48 and 0.61" },
+  { crate = "windows-targets@0.48.5", reason = "GPUI Windows dependencies span windows-targets 0.48 and 0.52" },
+  { crate = "windows_x86_64_gnu@0.48.5", reason = "GPUI Windows GNU target crates span versions 0.48 and 0.52" },
+  { crate = "windows_x86_64_msvc@0.48.5", reason = "GPUI Windows MSVC target crates span versions 0.48 and 0.52" },
+  { crate = "winnow@0.7.15", reason = "GPUI TOML dependencies span winnow 0.7 and 1.x" },
+  { crate = "zbus@5.19.0", reason = "GPUI Linux accessibility uses zbus 5 while notifications use zbus 6" },
+  { crate = "zbus_macros@5.19.0", reason = "GPUI Linux accessibility uses zbus macros 5 alongside notification stack 6" },
+  { crate = "zune-core@0.4.12", reason = "GPUI image decoder stack spans zune-core 0.4 and 0.5" },
+  { crate = "zune-jpeg@0.4.21", reason = "GPUI image decoder stack spans zune-jpeg 0.4 and 0.5" },
 ]
 
 [licenses]
@@ -38,8 +118,26 @@ allow = [
 # new crate arriving under the same license still trips the gate. The fuse is
 # `just deny`'s `-D license-exception-not-encountered`: when the named crate
 # leaves the dependency tree, CI fails and the entry must be deleted in that
-# same PR.
-exceptions = []
+# same PR. These crates are pulled in by GPUI's rendering, platform, font,
+# and asset dependencies; remove each exception when its crate leaves the tree.
+exceptions = [
+  { name = "arrayref", allow = ["BSD-2-Clause"] },
+  { name = "encoding_rs", allow = ["BSD-3-Clause"] },
+  { name = "exr", allow = ["BSD-3-Clause"] },
+  { name = "instant", allow = ["BSD-3-Clause"] },
+  { name = "lebe", allow = ["BSD-3-Clause"] },
+  { name = "foldhash", allow = ["Zlib"] },
+  { name = "notify", allow = ["CC0-1.0"] },
+  { name = "sha1_smol", allow = ["BSD-3-Clause"] },
+  { name = "subtle", allow = ["BSD-3-Clause"] },
+  { name = "tiny-skia", allow = ["BSD-3-Clause"] },
+  { name = "tiny-skia-path", allow = ["BSD-3-Clause"] },
+  { name = "slotmap", allow = ["Zlib"] },
+  { name = "tiny-keccak", allow = ["CC0-1.0"] },
+  { name = "cbindgen", allow = ["MPL-2.0"] },
+  { name = "dwrote", allow = ["MPL-2.0"] },
+  { name = "option-ext", allow = ["MPL-2.0"] },
+]
 
 [sources]
 unknown-registry = "deny"

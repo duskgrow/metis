@@ -37,8 +37,31 @@
             cargo-dist # cross-platform release; keep in sync with dist-workspace.toml
             actionlint # static analysis for GitHub Actions workflows
             nixd # Nix language server
-            nil # Nix language server (alternative — an editor uses one of the two)
+            nil # Nix language server (both are provided; an editor picks one)
+          ]) ++ (with pkgs; lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            clang
+            cmake
+            fontconfig
+            libxkbcommon
+            libxcb
+            libX11
+            openssl
+            pkg-config
+            vulkan-loader
+            wayland
+            webkitgtk_4_1
+            zstd
           ]);
+
+          # GPUI dlopens the Wayland client libraries at runtime; nothing links
+          # them, so Nix's automatic RUNPATH does not cover them. Vulkan and EGL
+          # are loaded the same way by the GPU backend.
+          LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
+            (pkgs.lib.makeLibraryPath [
+              pkgs.vulkan-loader
+              pkgs.libglvnd
+              pkgs.wayland
+            ]);
 
           shellHook = ''
             # Git hooks cannot travel with a clone (git's security model), so the
@@ -51,6 +74,7 @@
             fi
             # Banner goes to stderr: stdout of `nix develop -c <cmd>` must stay
             # clean for output-capturing callers (rust-cache's cmd-format parses it).
+
             echo "devShell ready. Entry point: just --list" >&2
           '';
         };
