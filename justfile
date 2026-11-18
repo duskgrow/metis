@@ -46,13 +46,13 @@ lint: _js-install
     pnpm --filter @metis/dsh-host typecheck
     actionlint -ignore 'SC2086' -ignore 'SC2129'
 
-# Tests: Rust default/headless/doctests, then TypeScript unit and real-dsh smoke tests
+# Tests: compile the plugin before Rust's runtime tests, then run all Rust and JavaScript checks
 test: _js-install
+    pnpm --filter @metis/dsh-host test
+    node --test scripts/check-js-licenses.test.mjs
     cargo nextest run --workspace --all-targets
     cargo nextest run -p metis --no-default-features --test cli
     cargo test --doc --workspace
-    pnpm --filter @metis/dsh-host test
-    node --test scripts/check-js-licenses.test.mjs
 
 # Build docs (rustdoc warnings are errors; RUSTDOCFLAGS injected at the top of this file)
 doc:

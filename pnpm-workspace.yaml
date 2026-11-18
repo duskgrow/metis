@@ -18,3 +18,9 @@ allowBuilds:
   koffi: false
   node-pty: false
   protobufjs: false
+
+# dsh's HMR dependency brings an unfixable picomatch ReDoS; remove this scoped
+# ignore when pnpm audit stops reporting the advisory.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-fc5q-39xc-vjpf

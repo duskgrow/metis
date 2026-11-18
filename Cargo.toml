@@ -25,6 +25,15 @@ thiserror = "2"
 # the `fancy` renderer may only appear in the final binary (top-level crate);
 # library crates should depend on plain miette instead
 miette = { version = "7", features = ["fancy"] }
+nix = { version = "0.31.4", default-features = false, features = ["signal"] }
+# process-wrap is pinned to the upstream commit containing the JobObject wait fix
+# until that fix reaches a crates.io release; remove the deny.toml source exception
+# together with this pin when switching back.
+process-wrap = { git = "https://github.com/watchexec/process-wrap", rev = "ccb58857b0bad6e3d8b85b7c9041bd407aa4cd1b", default-features = false, features = [
+  "std",
+  "process-group",
+  "job-object",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

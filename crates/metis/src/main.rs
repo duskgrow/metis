@@ -2,7 +2,8 @@
 //!
 //! `--help` and `--version` are generated from the clap definitions.
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
+use std::path::PathBuf;
 #[cfg(feature = "workbench")]
 use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
@@ -16,19 +17,53 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
-struct Cli {}
+struct Cli {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
 
-#[cfg(feature = "workbench")]
+#[derive(Subcommand)]
+enum CliCommand {
+    #[command(name = "__dsh-watchdog", hide = true)]
+    DshWatchdog(WatchdogArgs),
+}
+
+#[derive(Args)]
+struct WatchdogArgs {
+    #[arg(long)]
+    node: PathBuf,
+    #[arg(long)]
+    dsh: PathBuf,
+    #[arg(long)]
+    patch: PathBuf,
+    #[arg(long)]
+    home: PathBuf,
+    #[arg(long)]
+    port: u16,
+}
+
 fn main() -> miette::Result<()> {
     init_tracing();
-    Cli::parse();
+    if let Some(CliCommand::DshWatchdog(args)) = Cli::parse().command {
+        return metis::runtime::run_watchdog(&metis::runtime::WatchdogConfig {
+            node_executable: args.node,
+            dsh_entrypoint: args.dsh,
+            patch: args.patch,
+            home: args.home,
+            port: args.port,
+        })
+        .map_err(Into::into);
+    }
+    run_entrypoint()
+}
+
+#[cfg(feature = "workbench")]
+fn run_entrypoint() -> miette::Result<()> {
     run_workbench()
 }
 
 #[cfg(not(feature = "workbench"))]
-fn main() -> miette::Result<()> {
-    init_tracing();
-    Cli::parse();
+fn run_entrypoint() -> miette::Result<()> {
     Err(metis::Error::RuntimeUnavailable.into())
 }
 
@@ -120,4 +155,18 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory as _;
+
+    #[test]
+    fn watchdog_subcommand_name_is_wired() {
+        assert!(
+            super::Cli::command()
+                .find_subcommand(metis::runtime::WATCHDOG_COMMAND)
+                .is_some()
+        );
+    }
 }

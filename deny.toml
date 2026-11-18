@@ -144,3 +144,7 @@ exceptions = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Temporary source exception for the pinned process-wrap JobObject wait fix;
+# remove it together with the git pin in Cargo.toml.
+allow-git = ["https://github.com/watchexec/process-wrap"]
+required-git-spec = "rev"
