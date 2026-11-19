@@ -15,9 +15,11 @@ default:
     @just --list
 
 # Manual hook install for non-Nix shells — inside the devShell this happens
-# automatically on entry (git cannot ship hooks with a clone)
+# automatically on entry (git cannot ship hooks with a clone). `--force`
+# because prek owns every hook here: stale `<hook>.legacy` copies are removed
+# instead of keeping the shim in migration mode.
 setup:
-    prek install --hook-type pre-commit --hook-type commit-msg
+    prek install --force --hook-type pre-commit --hook-type commit-msg
 
 # In CI the pre-commit framework fails the job if files were modified by this
 # (see the quality-gate job), so the check-mode twin is only exercised there.

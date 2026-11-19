@@ -69,9 +69,11 @@
           shellHook = ''
             # Git hooks cannot travel with a clone (git's security model), so the
             # devShell arms them on entry — idempotent and skipped in CI and
-            # before `just init` creates .git. Non-Nix shells: `just setup`.
+            # before `just init` creates .git. `--force` because prek owns every
+            # hook here: it drops stale `<hook>.legacy` copies that would keep the
+            # shim in migration mode. Non-Nix shells: `just setup`.
             if [ -e .git ] && [ -z "''${CI:-}" ]; then
-              if ! prek install --hook-type pre-commit --hook-type commit-msg >/dev/null 2>&1; then
+              if ! prek install --force --hook-type pre-commit --hook-type commit-msg >/dev/null 2>&1; then
                 echo "warning: could not install git hooks; run 'just setup' to diagnose" >&2
               fi
             fi
