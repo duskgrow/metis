@@ -4,27 +4,7 @@ import { pathToFileURL } from "node:url";
 
 // These licenses were reviewed for the JavaScript dependency graph. Keep this
 // separate from deny.toml so the JavaScript review does not widen Rust policy.
-const additionalAllow = new Set([
-  "BSD-2-Clause",
-  "BSD-3-Clause",
-  "BlueOak-1.0.0",
-  "Python-2.0",
-  "Unlicense",
-]);
-
-// Copyleft stays package-scoped. Platform packages are matched as families so
-// each host can validate its installed graph without requiring other hosts' files.
-const packageExceptions = [
-  {
-    license: "MPL-2.0",
-    packages: ["@deepseek-ai/libreoffice-kit"],
-    packagePrefix: "@deepseek-ai/libreoffice-kit-",
-  },
-  {
-    license: "LGPL-3.0-or-later",
-    packagePrefixes: ["@img/sharp-libvips-", "@img/sharp-win32-"],
-  },
-];
+const additionalAllow = new Set(["Python-2.0"]);
 
 const denyToml = readFileSync(new URL("../deny.toml", import.meta.url), "utf8");
 const licenseSection = denyToml.slice(denyToml.indexOf("[licenses]"));
@@ -35,7 +15,6 @@ const baseAllow = new Set([...allowBlock[1].matchAll(/"([^"]+)"/g)].map(match =>
 export function checkLicenseReport(report, { checkStale = true } = {}) {
   const errors = [];
   const usedAdditional = new Set();
-  const usedExceptions = new Set();
   let packageCount = 0;
 
   function globallyAllowed(license) {
@@ -47,20 +26,7 @@ export function checkLicenseReport(report, { checkStale = true } = {}) {
     return false;
   }
 
-  function exceptionAllowed(license, name) {
-    const index = packageExceptions.findIndex(rule =>
-      rule.license === license && (
-        rule.packages?.includes(name)
-        || (rule.packagePrefix && name.startsWith(rule.packagePrefix))
-        || rule.packagePrefixes?.some(prefix => name.startsWith(prefix))
-      )
-    );
-    if (index < 0) return false;
-    usedExceptions.add(index);
-    return true;
-  }
-
-  function expressionAllowed(expression, name) {
+  function expressionAllowed(expression) {
     let normalized = expression.trim();
     if (/[()]/.test(normalized)) {
       // Accept one pair around the whole expression (the shape used by the
@@ -70,14 +36,14 @@ export function checkLicenseReport(report, { checkStale = true } = {}) {
       if (/[()]/.test(normalized)) return false;
     }
     return normalized.split(/\s+OR\s+/).some(orBranch =>
-      orBranch.split(/\s+AND\s+/).every(part => globallyAllowed(part.trim()) || exceptionAllowed(part.trim(), name))
+      orBranch.split(/\s+AND\s+/).every(part => globallyAllowed(part.trim()))
     );
   }
 
   for (const [license, packages] of Object.entries(report)) {
     for (const pkg of packages) {
       packageCount += 1;
-      if (!expressionAllowed(license, pkg.name)) {
+      if (!expressionAllowed(license)) {
         errors.push(`${pkg.name}@${pkg.versions.join(",")}: ${license}`);
       }
     }
@@ -86,12 +52,6 @@ export function checkLicenseReport(report, { checkStale = true } = {}) {
   if (checkStale) {
     for (const license of additionalAllow) {
       if (!usedAdditional.has(license)) errors.push(`stale JavaScript license allowance: ${license}`);
-    }
-    for (const [index, rule] of packageExceptions.entries()) {
-      if (!usedExceptions.has(index)) {
-        const packages = rule.packages ?? rule.packagePrefix ?? rule.packagePrefixes;
-        errors.push(`stale JavaScript package exception: ${rule.license} (${packages})`);
-      }
     }
   }
   return { errors, packageCount };

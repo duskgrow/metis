@@ -1,5 +1,12 @@
 //! Supervision for the private dsh runtime used by a workbench.
 //!
+//! The Node Host assembles dsh through its public profile-boot API. Line-based
+//! stdout events carry readiness without copying launch credentials into logs;
+//! stdin carries application shutdown and doubles as the Host lifetime pipe.
+//! Child stdout/stderr are drained by dedicated threads on both sides: the
+//! watchdog forwards them upward, and the supervisor parses stdout for ready
+//! while retaining all output for diagnostics.
+//!
 //! The watchdog is a hidden mode of the Metis executable. Its stdin is a
 //! lifetime pipe: if the workbench disappears, EOF tells the watchdog to stop
 //! the dsh process tree. Windows uses nested job objects so either the parent or
@@ -10,8 +17,7 @@
 //! separate external owner; that boundary stays tracked in milestone 0.
 
 use std::{
-    fmt::Write as _,
-    io::{self, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{Arc, Mutex, MutexGuard, mpsc},
@@ -25,9 +31,8 @@ use crate::{Error, Result};
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
-const DSH_GRACE_PERIOD: Duration = Duration::from_secs(2);
+const DSH_GRACE_PERIOD: Duration = Duration::from_secs(10);
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_millis(100);
-const PATCH_FILE_NAME: &str = "metis-host.patch.json";
 const DSH_EXIT_STATUS_FILE_NAME: &str = "dsh-exit-status";
 #[doc(hidden)]
 pub const WATCHDOG_COMMAND: &str = "__dsh-watchdog";
@@ -39,15 +44,17 @@ pub struct DshRuntimeConfig {
     pub metis_executable: PathBuf,
     /// Pinned Node.js executable.
     pub node_executable: PathBuf,
-    /// JavaScript entry point of the pinned dsh package.
-    pub dsh_entrypoint: PathBuf,
-    /// Compiled Metis Cordis plugin.
-    pub plugin: PathBuf,
-    /// Per-runtime dsh state directory, passed as `DSH_HOME`.
+    /// Built JavaScript entry point of the private Metis Host; the caller owns
+    /// its packaged location.
+    pub host_entrypoint: PathBuf,
+    /// Per-runtime dsh state directory, passed as `DSH_HOME`. The Host creates
+    /// its profile here, and the watchdog records an early Host exit beside it.
     pub home: PathBuf,
-    /// Maximum time to wait for dsh to accept TCP connections.
+    /// Maximum time to wait for the Host's authenticated ready event.
     pub startup_timeout: Duration,
     /// Maximum time to wait for the watchdog to clean up dsh on shutdown.
+    /// Normal configurations should exceed the watchdog's internal grace period;
+    /// shorter values are useful to exercise forced escalation.
     pub shutdown_timeout: Duration,
 }
 
@@ -76,29 +83,16 @@ impl DshSupervisor {
 
         let dsh_exit_status = config.home.join(DSH_EXIT_STATUS_FILE_NAME);
         let _ = self.platform.remove_file(&dsh_exit_status);
-        let patch_path = config.home.join(PATCH_FILE_NAME);
-        let patch = plugin_patch(&config.plugin)?;
-        self.platform
-            .write(&patch_path, patch.as_bytes())
-            .map_err(|source| Error::RuntimePrepare {
-                path: patch_path.clone(),
-                source,
-            })?;
-        let port = self.platform.available_port().map_err(Error::RuntimePort)?;
 
         let mut command = Command::new(&config.metis_executable);
         command
             .arg(WATCHDOG_COMMAND)
             .arg("--node")
             .arg(&config.node_executable)
-            .arg("--dsh")
-            .arg(&config.dsh_entrypoint)
-            .arg("--patch")
-            .arg(&patch_path)
+            .arg("--host")
+            .arg(&config.host_entrypoint)
             .arg("--home")
             .arg(&config.home)
-            .arg("--port")
-            .arg(port.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -120,19 +114,22 @@ impl DshSupervisor {
             return Err(Error::RuntimeOutputCapture);
         };
         let output = Arc::new(Mutex::new(String::new()));
+        let (host_events, events) = mpsc::sync_channel(1);
         let mut runtime = DshRuntime {
             id,
-            web_url: format!("http://127.0.0.1:{port}/"),
+            web_url: None,
+            auth_url: None,
             child: Some(child),
             output: Arc::clone(&output),
             readers: Vec::new(),
+            events,
             platform: Arc::clone(&self.platform),
             shutdown_timeout: config.shutdown_timeout,
         };
         // Construct the cleanup guard before spawning reader threads: a thread
         // creation panic must not strand the already-spawned runtime.
         runtime.readers.push(
-            spawn_output_reader(stdout, Arc::clone(&output), "dsh-stdout")
+            spawn_host_reader(stdout, Arc::clone(&output), "dsh-host-stdout", host_events)
                 .map_err(|_| Error::RuntimeOutputCapture)?,
         );
         runtime.readers.push(
@@ -140,7 +137,7 @@ impl DshSupervisor {
                 .map_err(|_| Error::RuntimeOutputCapture)?,
         );
 
-        if let Err(error) = runtime.wait_until_ready(config, port) {
+        if let Err(error) = runtime.wait_until_ready(config) {
             if let Err(cleanup_error) = runtime.shutdown() {
                 tracing::warn!(
                     %error,
@@ -158,6 +155,9 @@ impl DshSupervisor {
                 Error::RuntimeStartupTimeout { timeout, .. } => {
                     Error::RuntimeStartupTimeout { timeout, output }
                 }
+                Error::RuntimeStartupProtocol { message, .. } => {
+                    Error::RuntimeStartupProtocol { message, output }
+                }
                 error => error,
             });
         }
@@ -169,10 +169,12 @@ impl DshSupervisor {
 /// [`DshRuntime::shutdown`].
 pub struct DshRuntime {
     id: u32,
-    web_url: String,
+    web_url: Option<String>,
+    auth_url: Option<String>,
     child: Option<Box<dyn ChildWrapper>>,
     output: Arc<Mutex<String>>,
     readers: Vec<JoinHandle<()>>,
+    events: mpsc::Receiver<std::result::Result<HostReady, String>>,
     platform: Arc<dyn RuntimePlatform>,
     shutdown_timeout: Duration,
 }
@@ -184,10 +186,16 @@ impl DshRuntime {
         self.id
     }
 
-    /// The local dsh web root.
+    /// The local dsh Host root.
     #[must_use]
     pub fn web_url(&self) -> &str {
-        &self.web_url
+        self.web_url.as_deref().expect("runtime is ready")
+    }
+
+    /// Public dsh authentication URL for this Host instance.
+    #[must_use]
+    pub fn auth_url(&self) -> &str {
+        self.auth_url.as_deref().expect("runtime is ready")
     }
 
     /// Recent combined stdout/stderr for diagnostics. The buffer is bounded;
@@ -198,8 +206,8 @@ impl DshRuntime {
     }
 
     /// Stop the supervised process group/job and wait for its watchdog. dsh's
-    /// detached systemd scopes rely on its graceful signal handler; the final
-    /// group kill is not an external systemd-scope cleanup mechanism.
+    /// detached systemd scopes rely on Host-driven application disposal; the
+    /// final group kill is not an external systemd-scope cleanup mechanism.
     pub fn shutdown(&mut self) -> Result<()> {
         let Some(mut child) = self.child.take() else {
             return Ok(());
@@ -257,12 +265,30 @@ impl DshRuntime {
         Ok(())
     }
 
-    fn wait_until_ready(&mut self, config: &DshRuntimeConfig, port: u16) -> Result<()> {
+    fn wait_until_ready(&mut self, config: &DshRuntimeConfig) -> Result<()> {
         let deadline = self.platform.now() + config.startup_timeout;
+        let mut control_closed = false;
         loop {
-            if self.platform.is_listening(port) {
-                return Ok(());
+            if !control_closed {
+                match self.events.try_recv() {
+                    Ok(Ok(HostReady { web_url, auth_url })) => {
+                        self.web_url = Some(web_url);
+                        self.auth_url = Some(auth_url);
+                        return Ok(());
+                    }
+
+                    Ok(Err(message)) => {
+                        return Err(Error::RuntimeStartupProtocol {
+                            message,
+                            output: self.output_snapshot(),
+                        });
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => control_closed = true,
+                }
             }
+            // stdout EOF can become visible before waitpid reports the Host's
+            // exit. Always give process status priority over a protocol error.
             if let Some(status) = self
                 .child
                 .as_mut()
@@ -285,6 +311,13 @@ impl DshRuntime {
 
             let now = self.platform.now();
             if now >= deadline {
+                if control_closed {
+                    return Err(Error::RuntimeStartupProtocol {
+                        message: "the Host closed its control output before becoming ready"
+                            .to_owned(),
+                        output: self.output_snapshot(),
+                    });
+                }
                 return Err(Error::RuntimeStartupTimeout {
                     timeout: config.startup_timeout,
                     output: self.output_snapshot(),
@@ -309,6 +342,12 @@ impl Drop for DshRuntime {
     }
 }
 
+#[derive(Debug)]
+struct HostReady {
+    web_url: String,
+    auth_url: String,
+}
+
 /// Clock, filesystem, and process creation used by runtime supervision.
 /// Production uses [`SystemPlatform`]; tests can inject deterministic clocks or
 /// filesystem failures without global state.
@@ -319,8 +358,7 @@ pub trait RuntimePlatform: Send + Sync + 'static {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
     fn remove_file(&self, path: &Path) -> io::Result<()>;
-    fn available_port(&self) -> io::Result<u16>;
-    fn is_listening(&self, port: u16) -> bool;
+
     fn spawn(
         &self,
         command: Command,
@@ -363,16 +401,6 @@ impl RuntimePlatform for SystemPlatform {
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)
-    }
-
-    fn available_port(&self) -> io::Result<u16> {
-        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-        Ok(listener.local_addr()?.port())
-    }
-
-    fn is_listening(&self, port: u16) -> bool {
-        let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-        std::net::TcpStream::connect_timeout(&address, POLL_INTERVAL).is_ok()
     }
 
     fn spawn(
@@ -419,30 +447,20 @@ impl RuntimePlatform for SystemPlatform {
 #[derive(Clone, Debug)]
 pub struct WatchdogConfig {
     pub node_executable: PathBuf,
-    pub dsh_entrypoint: PathBuf,
-    pub patch: PathBuf,
+    pub host_entrypoint: PathBuf,
     pub home: PathBuf,
-    pub port: u16,
 }
 
-/// Run the dsh side of the lifetime pipe. Called only by the hidden binary
+/// Run the Host side of the lifetime pipe. Called only by the hidden binary
 /// subcommand, never by the workbench in-process.
 #[doc(hidden)]
 pub fn run_watchdog(config: &WatchdogConfig) -> Result<()> {
     let platform = SystemPlatform;
     let mut command = Command::new(&config.node_executable);
     command
-        .arg(&config.dsh_entrypoint)
-        .arg("web")
-        .arg("--patch")
-        .arg(&config.patch)
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(config.port.to_string())
-        .arg("--no-open")
+        .arg(&config.host_entrypoint)
         .env("DSH_HOME", &config.home)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = platform
@@ -477,7 +495,6 @@ pub fn run_watchdog(config: &WatchdogConfig) -> Result<()> {
     match monitor_dsh(child.as_mut(), &platform, &parent_closed) {
         Ok(None) => {
             let graceful_result = terminate_dsh(child.as_mut(), &platform);
-            #[cfg(unix)]
             if let Err(error) = &graceful_result {
                 tracing::warn!(%error, "graceful dsh shutdown failed; escalating to a group kill");
             }
@@ -576,8 +593,8 @@ fn drain_output_forwarders(readers: &mut Vec<JoinHandle<()>>, platform: &SystemP
         platform.sleep(POLL_INTERVAL.min(deadline - now));
     }
     for reader in readers.drain(..) {
-        // A descendant can hold an inner pipe forever. Such a forwarder remains
-        // owned by this short-lived watchdog and is destroyed with its process.
+        // Joining a live forwarder could block forever while a descendant holds
+        // an inner pipe; the short-lived watchdog exits after this bounded drain.
         if reader.is_finished() {
             let _ = reader.join();
         }
@@ -618,42 +635,38 @@ fn monitor_dsh(
 }
 
 fn terminate_dsh(child: &mut dyn ChildWrapper, platform: &SystemPlatform) -> Result<()> {
-    #[cfg(unix)]
+    // The Host disposes dsh's root synchronously before exiting; this includes
+    // its deliberately detached systemd scopes. Closing stdin
+    // after the command also covers a Host which has not finished booting.
+    if let Some(stdin) = child.stdin().as_mut()
+        && let Err(error) = stdin.write_all(b"METIS_SHUTDOWN\n")
+        && error.kind() != io::ErrorKind::BrokenPipe
     {
-        // Signal only Node first. The pinned dsh's SIGTERM handler disposes its
-        // root; the resulting exit hook synchronously terminates systemd scopes
-        // which deliberately escaped the shared process group.
-        if let Err(error) = child.signal(nix::sys::signal::Signal::SIGTERM as i32)
-            && error.raw_os_error() != Some(3)
-        {
-            return Err(Error::RuntimeKill(error));
-        }
+        return Err(Error::RuntimeShutdownRequest(error));
+    }
+    drop(child.stdin().take());
 
-        let deadline = platform.now() + DSH_GRACE_PERIOD;
-        let mut wait_result = Ok(());
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {}
-                Err(error) => {
-                    wait_result = Err(error);
-                    break;
-                }
-            }
-            let now = platform.now();
-            if now >= deadline {
+    // dsh's own disposal deadline is five seconds. Leave room for that deadline
+    // and process exit before escalating at the process-tree layer.
+    let deadline = platform.now() + DSH_GRACE_PERIOD;
+    let mut wait_result = Ok(());
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(error) => {
+                wait_result = Err(error);
                 break;
             }
-            platform.sleep(POLL_INTERVAL.min(deadline - now));
         }
+        let now = platform.now();
+        if now >= deadline {
+            break;
+        }
+        platform.sleep(POLL_INTERVAL.min(deadline - now));
+    }
 
-        wait_result.map_err(Error::RuntimeWait)
-    }
-    #[cfg(windows)]
-    {
-        let _ = (child, platform);
-        Ok(())
-    }
+    wait_result.map_err(Error::RuntimeWait)
 }
 
 fn force_stop_dsh(child: &mut dyn ChildWrapper) -> Result<()> {
@@ -678,6 +691,8 @@ fn force_stop_dsh(child: &mut dyn ChildWrapper) -> Result<()> {
     }
 }
 
+/// Drain the watchdog's stdin until the workbench closes it. The pipe carries no
+/// commands; EOF is the parent-death signal.
 fn read_parent_pipe() -> io::Result<()> {
     io::copy(&mut io::stdin().lock(), &mut io::sink()).map(|_| ())
 }
@@ -722,31 +737,114 @@ fn lock_output(output: &Mutex<String>) -> MutexGuard<'_, String> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn plugin_patch(plugin: &Path) -> Result<String> {
-    let plugin = plugin
-        .to_str()
-        .ok_or_else(|| Error::RuntimePathNotUnicode(plugin.to_owned()))?;
-    let mut json = String::from('"');
-    for character in plugin.chars() {
-        match character {
-            '"' => json.push_str("\\\""),
-            '\\' => json.push_str("\\\\"),
-            '\u{08}' => json.push_str("\\b"),
-            '\u{0c}' => json.push_str("\\f"),
-            '\n' => json.push_str("\\n"),
-            '\r' => json.push_str("\\r"),
-            '\t' => json.push_str("\\t"),
-            character if character <= '\u{1f}' => {
-                write!(json, "\\u{:04x}", u32::from(character))
-                    .expect("writing to a String cannot fail");
+fn valid_host_web_url(url: &str) -> bool {
+    url.strip_prefix("http://127.0.0.1:")
+        .and_then(|rest| rest.strip_suffix('/'))
+        .is_some_and(|port| {
+            !port.is_empty()
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|port| port > 0)
+        })
+}
+
+/// The callers scan one bounded output line for a short fixed marker, so a
+/// direct scan is simpler than a substring-search state machine.
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn parse_host_control_line(line: &[u8]) -> Option<std::result::Result<HostReady, String>> {
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim_end_matches(['\r', '\n']);
+    if !line.starts_with("METIS_READY\t") {
+        return line
+            .contains("METIS_READY")
+            .then(|| Err("the Host interleaved control and diagnostic output".to_owned()));
+    }
+    let mut fields = line["METIS_READY\t".len()..].split('\t');
+    let web_url = fields.next().expect("ready URL field");
+    let auth_url = fields.next().unwrap_or_default();
+    let auth_prefix = format!("{web_url}connect?token=");
+    let token = auth_url.strip_prefix(&auth_prefix).unwrap_or_default();
+    let valid = fields.next().is_none()
+        && valid_host_web_url(web_url)
+        && !token.is_empty()
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if !valid {
+        return Some(Err("the Host sent an invalid ready event".to_owned()));
+    }
+    Some(Ok(HostReady {
+        web_url: web_url.to_owned(),
+        auth_url: auth_url.to_owned(),
+    }))
+}
+
+fn drain_host_line(reader: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let (consumed, finished) = {
+            let buffer = reader.fill_buf()?;
+            if buffer.is_empty() {
+                return Ok(());
             }
-            character => json.push(character),
+            match buffer.iter().position(|byte| *byte == b'\n') {
+                Some(position) => (position + 1, true),
+                None => (buffer.len(), false),
+            }
+        };
+        reader.consume(consumed);
+        if finished {
+            return Ok(());
         }
     }
-    json.push('"');
-    Ok(format!(
-        "[{{\"insert\":[{{\"id\":\"metis-host\",\"name\":{json}}}]}}]\n"
-    ))
+}
+
+fn spawn_host_reader<T>(
+    reader: T,
+    output: Arc<Mutex<String>>,
+    name: &'static str,
+    events: mpsc::SyncSender<std::result::Result<HostReady, String>>,
+) -> io::Result<JoinHandle<()>>
+where
+    T: Read + Send + 'static,
+{
+    thread::Builder::new().name(name.to_owned()).spawn(move || {
+        let mut reader = BufReader::new(reader);
+        loop {
+            let mut line = Vec::new();
+            // The Take limit bounds one line for this call only; bytes after a
+            // newline stay in the BufReader for the next iteration.
+            let read = reader
+                .by_ref()
+                .take((MAX_OUTPUT_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line);
+            match read {
+                Ok(0) => return,
+                Ok(_) if line.len() > MAX_OUTPUT_BYTES && !line.ends_with(b"\n") => {
+                    if contains_bytes(&line, b"METIS_READY") {
+                        let _ = events
+                            .try_send(Err("the Host exceeded the control-line limit".to_owned()));
+                    } else {
+                        push_output(&mut lock_output(&output), &line);
+                    }
+                    if drain_host_line(&mut reader).is_err() {
+                        return;
+                    }
+                }
+                Ok(_) => match parse_host_control_line(&line) {
+                    Some(event) => {
+                        let _ = events.try_send(event);
+                    }
+                    None => push_output(&mut lock_output(&output), &line),
+                },
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -779,12 +877,72 @@ mod tests {
         assert_eq!(input.position(), input.get_ref().len() as u64);
     }
 
+    fn read_host_output(input: Vec<u8>) -> (String, Vec<std::result::Result<HostReady, String>>) {
+        let output = Arc::new(Mutex::new(String::new()));
+        let (events, receiver) = mpsc::sync_channel(1);
+        let reader = spawn_host_reader(
+            io::Cursor::new(input),
+            Arc::clone(&output),
+            "test-host-stdout",
+            events,
+        )
+        .expect("spawn Host reader");
+        reader.join().expect("join Host reader");
+        let events = receiver.iter().collect();
+        (lock_output(&output).clone(), events)
+    }
+
     #[test]
-    fn patch_is_json_with_an_escaped_plugin_path() {
-        let patch = plugin_patch(Path::new("C:\\work\\\"plugin\"\n.js")).expect("Unicode path");
-        assert_eq!(
-            patch,
-            "[{\"insert\":[{\"id\":\"metis-host\",\"name\":\"C:\\\\work\\\\\\\"plugin\\\"\\n.js\"}]}]\n"
-        );
+    fn host_ready_requires_paired_loopback_urls() {
+        let token = "test-token";
+        let web_url = "http://127.0.0.1:1234/";
+        let auth_url = format!("{web_url}connect?token={token}");
+        let event =
+            parse_host_control_line(format!("METIS_READY\t{web_url}\t{auth_url}\n").as_bytes())
+                .expect("control line")
+                .expect("valid ready event");
+        assert_eq!(event.web_url, web_url);
+        assert_eq!(event.auth_url, auth_url);
+
+        for (web_url, auth_url) in [
+            (
+                "http://127.0.0.1:1234@evil.example/",
+                format!("http://127.0.0.1:1234@evil.example/connect?token={token}"),
+            ),
+            (
+                "http://127.0.0.1:0/",
+                format!("{web_url}connect?token={token}"),
+            ),
+            (
+                "http://127.0.0.1:not-a-port/",
+                format!("{web_url}connect?token={token}"),
+            ),
+            (web_url, format!("{auth_url}&unexpected=true")),
+        ] {
+            assert!(
+                parse_host_control_line(format!("METIS_READY\t{web_url}\t{auth_url}\n").as_bytes())
+                    .expect("control line")
+                    .is_err(),
+                "accepted invalid pair: {web_url} {auth_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_reader_bounds_unterminated_output() {
+        let (output, events) = read_host_output(vec![b'x'; MAX_OUTPUT_BYTES * 3]);
+        assert!(output.len() <= MAX_OUTPUT_BYTES);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn host_reader_redacts_interleaved_ready_credentials() {
+        let token = "A".repeat(43);
+        let web_url = "http://127.0.0.1:1234/";
+        let input =
+            format!("unfinished logMETIS_READY\t{web_url}\t{web_url}connect?token={token}\n");
+        let (output, events) = read_host_output(input.into_bytes());
+        assert!(!output.contains(&token));
+        assert!(events.first().is_some_and(std::result::Result::is_err));
     }
 }

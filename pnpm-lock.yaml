@@ -17,9 +17,6 @@ importers:
       '@deepseek-ai/cordis':
         specifier: ~4.1.0
         version: 4.1.0(@deepseek-ai/cordis-plugin-include@1.1.0)(@deepseek-ai/cordis-plugin-loader@1.1.0)
-      '@deepseek-ai/dsh':
-        specifier: 0.2.2-rc.3
-        version: 0.2.2-rc.3(c2602e2272161eef727ec1fe29e07f51)
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2
@@ -27,7 +24,23 @@ importers:
         specifier: 6.0.3
         version: 6.0.3
 
-  packages/metis-host: {}
+  packages/metis-host:
+    dependencies:
+      '@deepseek-ai/dsh':
+        specifier: 0.2.2-rc.3
+        version: 0.2.2-rc.3(c2602e2272161eef727ec1fe29e07f51)
+      '@deepseek-ai/dsh-app-boot':
+        specifier: 0.2.2-rc.3
+        version: 0.2.2-rc.3(@deepseek-ai/cordis-plugin-group@1.1.0(@deepseek-ai/cordis-plugin-loader@1.1.0)(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/cordis-plugin-include@1.1.0)(@deepseek-ai/cordis-plugin-loader@1.1.0)(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-home-paths@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/dsh-launch-environment@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0))
+      '@deepseek-ai/dsh-base':
+        specifier: 0.2.2-rc.3
+        version: 0.2.2-rc.3(173f37c73d4f3198f88d764487140b8b)
+      '@deepseek-ai/dsh-client-connection':
+        specifier: 0.2.2-rc.3
+        version: 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-scope@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0))
+      '@deepseek-ai/dsh-host-webserver':
+        specifier: 0.2.2-rc.3
+        version: 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)
 
 packages:
 

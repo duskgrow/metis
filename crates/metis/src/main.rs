@@ -33,13 +33,9 @@ struct WatchdogArgs {
     #[arg(long)]
     node: PathBuf,
     #[arg(long)]
-    dsh: PathBuf,
-    #[arg(long)]
-    patch: PathBuf,
+    host: PathBuf,
     #[arg(long)]
     home: PathBuf,
-    #[arg(long)]
-    port: u16,
 }
 
 fn main() -> miette::Result<()> {
@@ -47,10 +43,8 @@ fn main() -> miette::Result<()> {
     if let Some(CliCommand::DshWatchdog(args)) = Cli::parse().command {
         return metis::runtime::run_watchdog(&metis::runtime::WatchdogConfig {
             node_executable: args.node,
-            dsh_entrypoint: args.dsh,
-            patch: args.patch,
+            host_entrypoint: args.host,
             home: args.home,
-            port: args.port,
         })
         .map_err(Into::into);
     }

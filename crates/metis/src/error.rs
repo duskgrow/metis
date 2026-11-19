@@ -41,7 +41,7 @@ pub enum Error {
         )
     )]
     WorkbenchStartup(String),
-    /// The per-runtime directory or plugin patch could not be written.
+    /// The per-runtime directory could not be created.
     #[error("failed to prepare dsh runtime at `{}`: {source}", .path.display())]
     #[diagnostic(
         code(metis::runtime_prepare),
@@ -52,17 +52,6 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
-    /// A loopback port for dsh could not be allocated.
-    #[error("failed to allocate a loopback port for dsh: {0}")]
-    #[diagnostic(code(metis::runtime_port))]
-    RuntimePort(#[source] io::Error),
-    /// A plugin path cannot be represented in dsh's JSON patch.
-    #[error("the Metis plugin path is not valid Unicode: `{}`", .0.display())]
-    #[diagnostic(
-        code(metis::runtime_path_encoding),
-        help("install Metis and its runtime at a path representable in Unicode")
-    )]
-    RuntimePathNotUnicode(PathBuf),
     /// The watchdog or Node.js process could not be spawned.
     #[error("failed to spawn `{}`: {source}", .program.display())]
     #[diagnostic(
@@ -82,6 +71,10 @@ pub enum Error {
     #[error("failed while waiting for a dsh runtime process: {0}")]
     #[diagnostic(code(metis::runtime_wait))]
     RuntimeWait(#[source] io::Error),
+    /// Sending the application-level shutdown request failed.
+    #[error("failed to request dsh Host shutdown: {0}")]
+    #[diagnostic(code(metis::runtime_shutdown_request))]
+    RuntimeShutdownRequest(#[source] io::Error),
     /// Sending the final termination signal failed.
     #[error("failed to terminate the dsh runtime process tree: {0}")]
     #[diagnostic(code(metis::runtime_kill))]
@@ -95,8 +88,15 @@ pub enum Error {
         )
     )]
     RuntimeStartupExit { status: String, output: String },
-    /// dsh stayed alive but did not start accepting loopback TCP connections.
-    #[error("dsh did not accept loopback TCP connections within {timeout:?}; output:\n{output}")]
+    /// The Host violated its private startup protocol.
+    #[error("dsh Host startup protocol failed: {message}; output:\n{output}")]
+    #[diagnostic(
+        code(metis::runtime_startup_protocol),
+        help("verify that the packaged Metis Host and dsh dependencies were installed together")
+    )]
+    RuntimeStartupProtocol { message: String, output: String },
+    /// dsh stayed alive but did not become ready.
+    #[error("dsh did not become ready within {timeout:?}; output:\n{output}")]
     #[diagnostic(
         code(metis::runtime_startup_timeout),
         help("inspect the captured output; the incomplete runtime was terminated")

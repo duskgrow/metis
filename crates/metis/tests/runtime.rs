@@ -47,11 +47,29 @@ process.exitCode = alive ? 1 : 0;
 
 const FAKE_WEB_SERVER: &str = r#"
 const webServer = require("node:net").createServer();
-webServer.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0.1");
+webServer.listen(0, "127.0.0.1", () => {
+  const url = `http://127.0.0.1:${webServer.address().port}/`;
+  process.stdout.write(`METIS_READY\t${url}\t${url}connect?token=test-token\n`);
+});
 "#;
 
+const FAKE_HOST_CONTROL: &str = r#"
+let controlInput = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  controlInput += chunk;
+  if (controlInput.includes("METIS_SHUTDOWN\n")) process.kill(process.pid, "SIGTERM");
+});
+process.stdin.on("end", () => process.kill(process.pid, "SIGTERM"));
+process.stdin.resume();
+"#;
+
+fn with_host_control(script: &str) -> String {
+    format!("{FAKE_HOST_CONTROL}\n{script}")
+}
+
 fn with_web_server(script: &str) -> String {
-    format!("{FAKE_WEB_SERVER}\n{script}")
+    with_host_control(&format!("{FAKE_WEB_SERVER}\n{script}"))
 }
 
 #[test]
@@ -61,6 +79,10 @@ fn real_dsh_loads_plugin_and_stops() {
     let mut runtime = DshSupervisor::system()
         .start(&config)
         .expect("start the pinned dsh with the Metis plugin");
+    let auth_url = runtime.auth_url().to_owned();
+    assert!(auth_url.starts_with(&format!("{}connect?token=", runtime.web_url())));
+    assert!(!runtime.output_snapshot().contains(&auth_url));
+    assert!(!runtime.output_snapshot().contains("METIS_READY"));
 
     wait_until(
         || {
@@ -78,6 +100,7 @@ fn real_dsh_loads_plugin_and_stops() {
         .to_owned();
     let watchdog = runtime.id();
     let _cleanup = TestTreeGuard::containing(watchdog, &[watchdog]);
+    TcpStream::connect(&address).expect("the reported Host listener accepts connections");
     runtime.shutdown().expect("stop the dsh process tree");
     runtime.shutdown().expect("shutdown is idempotent");
     wait_until(
@@ -95,12 +118,14 @@ fn startup_timeout_cleans_up_the_dsh_process() {
     let directory = TestDirectory::new("startup-timeout");
     let script = directory.write(
         "never-ready.cjs",
-        r#"
+        &with_host_control(
+            r#"
 const fs = require("node:fs");
 fs.writeFileSync(require("node:path").join(process.env.DSH_HOME, "dsh.pid"), String(process.pid));
 console.log("fake dsh started without a listener");
 setInterval(() => {}, 1000);
 "#,
+        ),
     );
     let mut config = runtime_config(&directory, script);
     config.startup_timeout = Duration::from_secs(2);
@@ -202,7 +227,7 @@ fn shutdown_escalation_covers_the_shared_process_group() {
     );
     assert!(
         started.elapsed() < Duration::from_secs(1),
-        "the outer group kill must not wait for the watchdog's two-second grace period"
+        "the outer group kill must not wait for the watchdog's internal grace period"
     );
     wait_until(
         || processes_have_exited(&[watchdog, dsh, agent]),
@@ -381,11 +406,10 @@ fn run_crash_fixture_parent() {
         .start(&DshRuntimeConfig {
             metis_executable: PathBuf::from(env!("CARGO_BIN_EXE_metis")),
             node_executable: PathBuf::from("node"),
-            dsh_entrypoint: script,
-            plugin: workspace_root().join("packages/metis-host/lib/index.js"),
+            host_entrypoint: script,
             home: directory.join("dsh-home"),
             startup_timeout: Duration::from_secs(10),
-            shutdown_timeout: Duration::from_secs(5),
+            shutdown_timeout: Duration::from_secs(15),
         })
         .expect("fixture workbench starts its runtime");
     fs::write(directory.join("ready"), runtime.id().to_string()).expect("publish watchdog PID");
@@ -397,20 +421,19 @@ fn run_crash_fixture_parent() {
     }
 }
 
-fn runtime_config(directory: &TestDirectory, dsh_entrypoint: PathBuf) -> DshRuntimeConfig {
+fn runtime_config(directory: &TestDirectory, host_entrypoint: PathBuf) -> DshRuntimeConfig {
     DshRuntimeConfig {
         metis_executable: PathBuf::from(env!("CARGO_BIN_EXE_metis")),
         node_executable: PathBuf::from("node"),
-        dsh_entrypoint,
-        plugin: workspace_root().join("packages/metis-host/lib/index.js"),
+        host_entrypoint,
         home: directory.path.join("dsh-home"),
         startup_timeout: Duration::from_secs(30),
-        shutdown_timeout: Duration::from_secs(5),
+        shutdown_timeout: Duration::from_secs(15),
     }
 }
 
 fn real_dsh_entrypoint() -> PathBuf {
-    workspace_root().join("node_modules/@deepseek-ai/dsh/lib/bin.js")
+    workspace_root().join("packages/metis-host/lib/host.js")
 }
 
 fn workspace_root() -> PathBuf {

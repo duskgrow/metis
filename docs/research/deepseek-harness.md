@@ -17,9 +17,11 @@ Node.js 补丁版本会直接影响可用性。同一 dsh 在 Node.js 24.18.0 �
 
 dsh 的原生 Linux 子进程可以脱离原进程组并交由用户级 systemd scope 管理。当前监督层无法回收 dsh 卡死或被提前强杀后遗留的独立 scope，因此[里程碑 0 的强制终止验证](../product-scope.md)仍未完成；需要真实模型任务验证，并为这个失败路径补充外部 scope 清理。多客户端与重连、干净 NixOS 安装以及无显示发行包也仍未验证。
 
+2026-11-19 在同一环境使用公开发布包验证了私有 Node.js Host：公开 `runProfile` 装配 `dsh-base`、webserver、client-connection 和 Metis 插件，无需 Electron、private Desktop Host 或上游源码投影。Host 不加载 `dsh-web-app` 时根路径返回 404，但公开 BrowserAuth、HTTP RPC、Cordis 事件、智能体创建与销毁、应用级关闭均通过；固定 Node.js 直接启动原 Desktop Host 的 ready、shutdown 和父进程断开路径也已通过。验证尚未覆盖真实模型轮次、跨客户端流式事件与重连；当前完整 CLI 包的依赖闭包仍包含未装载的 Web 组件，发行裁剪不在本次结论内。
+
 ## 接入方式
 
-Metis 通过 Cordis 插件和 profile 将项目、Git 以及主机／项目／会话映射加入固定版本的 Harness Web 运行时。工作台直接连接扩展后的 dsh，使用 Harness 的会话、事件、审批和任务能力。
+Metis 的私有 Node.js Host 调用公开 `runProfile`，通过 app-owned profile 和 Cordis 插件为 dsh 添加项目、Git 以及主机／项目／会话映射。工作台直接连接该 Host，使用 Harness 的会话、事件、审批和任务能力。
 
 上游仍处于开发者预览阶段，集成需要固定版本，并用契约测试验证升级。
 
