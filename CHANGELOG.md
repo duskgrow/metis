@@ -11,3 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      release heading leak into the Release PR body. -->
 
 ## [Unreleased]
+## [0.1.0](https://github.com/duskgrow/metis/releases/tag/v0.1.0) - 2026-11-20
+### Features
+- add workbench shell with private dsh host ([#4](https://github.com/duskgrow/metis/pull/4))
+### Other
+- initialize metis workspace
