@@ -6,6 +6,8 @@
 
 ## 安装
 
+运行 Metis 的主机需要预先安装 Git。
+
 首次发版后可使用 GitHub Release 的安装脚本：
 
     curl --proto '=https' --tlsv1.2 -LsSf https://github.com/duskgrow/metis/releases/latest/download/metis-installer.sh | sh
@@ -14,7 +16,7 @@
 
 ## 使用
 
-见 `metis --help`。
+启动 `metis` 可打开工作台；`metis --help` 查看命令帮助。
 
 ## 设计文档
 

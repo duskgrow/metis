@@ -9,6 +9,8 @@ A personal multi-host agent workbench for continuing sessions, jobs, and approva
 
 ## Install
 
+Git must be installed on each host running Metis.
+
 After the first release, use the installer from GitHub Releases:
 
     curl --proto '=https' --tlsv1.2 -LsSf https://github.com/duskgrow/metis/releases/latest/download/metis-installer.sh | sh
@@ -18,7 +20,7 @@ and publishing the crate; see the Releasing section in CONTRIBUTING.md.
 
 ## Usage
 
-See `metis --help`.
+Run `metis` to open the workbench. Use `metis --help` for command help.
 
 ## Design
 

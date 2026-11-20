@@ -271,41 +271,65 @@ mod tests {
 
     #[test]
     fn accepts_plain_scoped_and_breaking_headers() {
-        assert!(errors_of("feat: add thing").is_empty());
-        assert!(errors_of("fix(cli): correct thing").is_empty());
-        assert!(errors_of("chore!: drop old thing").is_empty());
-        assert!(errors_of("docs(api): note").is_empty());
+        assert_eq!(errors_of("feat: add thing"), Vec::<String>::new());
+        assert_eq!(errors_of("fix(cli): correct thing"), Vec::<String>::new());
+        assert_eq!(errors_of("chore!: drop old thing"), Vec::<String>::new());
+        assert_eq!(errors_of("docs(api): note"), Vec::<String>::new());
     }
 
     #[test]
     fn rejects_missing_type_and_non_ascii_subject() {
-        assert!(!errors_of("initial commit").is_empty());
-        assert!(!errors_of("feat: 添加了什么").is_empty());
-        assert!(!errors_of("FEAT: loud").is_empty());
-        assert!(!errors_of("feat(CLI): loud scope").is_empty());
+        assert_ne!(errors_of("initial commit"), Vec::<String>::new());
+        assert_ne!(errors_of("feat: 添加了什么"), Vec::<String>::new());
+        assert_ne!(errors_of("FEAT: loud"), Vec::<String>::new());
+        assert_ne!(errors_of("feat(CLI): loud scope"), Vec::<String>::new());
     }
 
     #[test]
     fn enforces_header_length_and_blank_separator() {
         let long = format!("feat: {}", "x".repeat(HEADER_MAX));
-        assert!(!errors_of(&long).is_empty());
-        assert!(!errors_of("feat: x\nbody without blank line").is_empty());
-        assert!(errors_of("feat: x\n\nbody is fine").is_empty());
+        assert_ne!(errors_of(&long), Vec::<String>::new());
+        assert_ne!(
+            errors_of("feat: x\nbody without blank line"),
+            Vec::<String>::new()
+        );
+        assert_eq!(errors_of("feat: x\n\nbody is fine"), Vec::<String>::new());
     }
 
     #[test]
     fn footers_need_a_preceding_blank_line() {
-        assert!(errors_of("feat: x\n\nbody\n\nBREAKING CHANGE: y").is_empty());
-        assert!(!errors_of("feat: x\nbody\nBREAKING CHANGE: y").is_empty());
-        assert!(!errors_of("feat: x\nbody\nReviewed-by: someone").is_empty());
-        assert!(errors_of("feat: x\n\nReviewed-by: someone").is_empty());
+        assert_eq!(
+            errors_of("feat: x\n\nbody\n\nBREAKING CHANGE: y"),
+            Vec::<String>::new()
+        );
+        assert_ne!(
+            errors_of("feat: x\nbody\nBREAKING CHANGE: y"),
+            Vec::<String>::new()
+        );
+        assert_ne!(
+            errors_of("feat: x\nbody\nReviewed-by: someone"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            errors_of("feat: x\n\nReviewed-by: someone"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn rejects_html_comments_anywhere() {
-        assert!(!errors_of("feat: x\n\nbody\n\n<!-- template note -->").is_empty());
-        assert!(!errors_of("feat: x\n\n<!-- lone comment -->").is_empty());
-        assert!(errors_of("feat: x\n\nbody without comments").is_empty());
+        assert_ne!(
+            errors_of("feat: x\n\nbody\n\n<!-- template note -->"),
+            Vec::<String>::new()
+        );
+        assert_ne!(
+            errors_of("feat: x\n\n<!-- lone comment -->"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            errors_of("feat: x\n\nbody without comments"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -317,11 +341,17 @@ mod tests {
                 .join("\n")
         };
         // the boundary follows the longest paragraph in an accepted main body
-        assert!(errors_of(&format!("feat: x\n\n{}", prose(BODY_PROSE_RUN_MAX))).is_empty());
-        assert!(!errors_of(&format!("feat: x\n\n{}", prose(BODY_PROSE_RUN_MAX + 1))).is_empty());
+        assert_eq!(
+            errors_of(&format!("feat: x\n\n{}", prose(BODY_PROSE_RUN_MAX))),
+            Vec::<String>::new()
+        );
+        assert_ne!(
+            errors_of(&format!("feat: x\n\n{}", prose(BODY_PROSE_RUN_MAX + 1))),
+            Vec::<String>::new()
+        );
         // splitting the same text into two paragraphs is fine
         let split = format!("feat: x\n\n{}\n\n{}", prose(4), prose(4));
-        assert!(errors_of(&split).is_empty());
+        assert_eq!(errors_of(&split), Vec::<String>::new());
         // one violation per run, not one per line
         assert_eq!(
             errors_of(&format!("feat: x\n\n{}", prose(BODY_PROSE_RUN_MAX + 3))).len(),
@@ -335,36 +365,63 @@ mod tests {
             .map(|i| format!("- item {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(errors_of(&format!("feat: x\n\n{bullets}")).is_empty());
+        assert_eq!(
+            errors_of(&format!("feat: x\n\n{bullets}")),
+            Vec::<String>::new()
+        );
         let numbered = (1..=10)
             .map(|i| format!("{i}. item"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(errors_of(&format!("feat: x\n\n{numbered}")).is_empty());
+        assert_eq!(
+            errors_of(&format!("feat: x\n\n{numbered}")),
+            Vec::<String>::new()
+        );
         let quote = (1..=10)
             .map(|i| format!("> note {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(errors_of(&format!("feat: x\n\n{quote}")).is_empty());
+        assert_eq!(
+            errors_of(&format!("feat: x\n\n{quote}")),
+            Vec::<String>::new()
+        );
         let fence = format!("feat: x\n\n```text\n{}\n```", "log line\n".repeat(10));
-        assert!(errors_of(&fence).is_empty());
+        assert_eq!(errors_of(&fence), Vec::<String>::new());
     }
 
     #[test]
     fn rejects_task_lists_and_cut_lines() {
         // scaffolding from the old two-zone template must not land in history
-        assert!(!errors_of("feat: x\n\nbody\n\n- [ ] open item").is_empty());
-        assert!(!errors_of("feat: x\n\nbody\n\n- [x] done item").is_empty());
-        assert!(!errors_of("feat: x\n\nbody\n\n  - [X] nested item").is_empty());
-        assert!(!errors_of("feat: x\n\nbody\n\n---").is_empty());
-        assert!(!errors_of("feat: x\n\nbody\n\n\n---\n\nmore").is_empty());
+        assert_ne!(
+            errors_of("feat: x\n\nbody\n\n- [ ] open item"),
+            Vec::<String>::new()
+        );
+        assert_ne!(
+            errors_of("feat: x\n\nbody\n\n- [x] done item"),
+            Vec::<String>::new()
+        );
+        assert_ne!(
+            errors_of("feat: x\n\nbody\n\n  - [X] nested item"),
+            Vec::<String>::new()
+        );
+        assert_ne!(errors_of("feat: x\n\nbody\n\n---"), Vec::<String>::new());
+        assert_ne!(
+            errors_of("feat: x\n\nbody\n\n\n---\n\nmore"),
+            Vec::<String>::new()
+        );
         // plain lists, prose and em-dash usage stay legal
-        assert!(errors_of("feat: x\n\nbody\n\n- plain item\n- another --- with text").is_empty());
+        assert_eq!(
+            errors_of("feat: x\n\nbody\n\n- plain item\n- another --- with text"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn git_style_comment_lines_are_stripped_first() {
-        assert!(errors_of("feat: x\n# Please enter the commit message").is_empty());
+        assert_eq!(
+            errors_of("feat: x\n# Please enter the commit message"),
+            Vec::<String>::new()
+        );
         assert_eq!(errors_of("# only a comment"), vec!["message is empty"]);
     }
 }

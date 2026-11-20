@@ -7,10 +7,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+default = ["workbench"]
+workbench = [
+  "dep:gpui-kit",
+  "gpui-kit/component",
+  "gpui-kit/assets",
+  "gpui-kit/tree-sitter-languages",
+]
 
 # the GitHub Release body is generated from this changelog's matching section
 # (module-grouped per the [changelog] config in release-plz.toml)
@@ -19,11 +27,15 @@ changelog = "../../CHANGELOG.md"
 
 [dependencies]
 clap.workspace = true
+gpui-kit = { workspace = true, optional = true }
 thiserror.workspace = true
 miette.workspace = true
+process-wrap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

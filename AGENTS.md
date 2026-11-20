@@ -5,7 +5,7 @@
 ## Commands (just is the only entry point; never bypass the quality gates)
 
 - Core quality gate: `just ci` (run before every commit; CI adds platform and hosting checks, and the template repository additionally runs bootstrap smoke)
-- Format / static checks: `just fmt` / `just lint` (rustfmt + dprint for Markdown/TOML; actionlint on workflow YAML)
+- Format / static checks: `just fmt` / `just lint` (rustfmt + dprint for Markdown/TOML/TS/JS; TypeScript typecheck; actionlint on workflow YAML)
 - All tests: `just test`; single test: `cargo nextest run -p metis <name>`
 - Iterate with the narrowest loop first (`cargo check -p <crate>`, scoped nextest); finish with `just ci`
 - Snapshot updates: `just snapshot-review` (approve each diff by hand; never bulk-accept)
@@ -15,10 +15,10 @@
 
 ## Environment
 
-- Toolchains come from flake.nix: `direnv allow` or `nix develop`. `rust-toolchain.toml` is the version SSOT — no other file may restate toolchain versions.
+- Toolchains come from flake.nix: `direnv allow` or `nix develop`. Version SSOTs: `rust-toolchain.toml` for Rust, `.node-version` for Node.js, and root `package.json` `packageManager` for pnpm; no other file may restate them.
 - The agent terminal spawns a bare shell without the direnv hook, so `.envrc` never loads and `cargo`/`just` resolve to the user profile instead of flake.nix. Prefix such commands with `direnv exec .` when the flake toolchain is needed (e.g. `direnv exec . just ci`); this includes `git commit`, whose prek hooks run `just fmt` and `just lint`.
-- `just deny` needs network access to fetch the RustSec advisory DB; when offline, skip that one item and run the rest.
-- Native Windows development goes through WSL2 (Nix has no native Windows support); CI's windows job consumes the same `rust-toolchain.toml` / `Cargo.lock`.
+- `just deny` needs network access for the RustSec and npm advisory checks; when offline, skip that one item and run the rest.
+- Native Windows development goes through WSL2 (Nix has no native Windows support); CI's windows job consumes the same Rust/Node pins and Cargo/pnpm lockfiles.
 
 ## Skills (procedures live in .agents/skills/; constraints stay in this file)
 
@@ -35,7 +35,7 @@ Done = `just ci` green + the `pr-preflight` checklist clean.
 
 ## NEVER
 
-- NEVER hand-edit generated files: `Cargo.lock`, any generated entries in `CHANGELOG.md` (including released sections), `.github/workflows/release.yml` (generator: `dist generate`; drift check: `just dist-check`).
+- NEVER hand-edit generated files: `Cargo.lock`, `pnpm-lock.yaml`, any generated entries in `CHANGELOG.md` (including released sections), `.github/workflows/release.yml` (generator: `dist generate`; drift check: `just dist-check`).
 - NEVER write multi-line logic in a CI YAML `run:` field — sink it into the justfile; CI only calls single-line entry points.
 - NEVER hand-write version numbers: the single storage point is `[workspace.package] version` in the root `Cargo.toml`; release-plz rewrites it mechanically.
 - NEVER commit code that hasn't passed `just ci`; NEVER assemble ad-hoc check pipelines that bypass just.

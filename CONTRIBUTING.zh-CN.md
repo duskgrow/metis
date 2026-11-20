@@ -52,6 +52,8 @@ git 钩子（pre-commit + commit-msg）在进入 devShell 时自动安装——g
 2. 成员 crate 用 `dep.workspace = true` 继承，只允许追加 `features` / `optional`；
 3. `just deny` 会通过许可证与来源检查；新许可证需要先在 PR 中讨论再扩 `deny.toml` 白名单。
 
+JavaScript 共享开发工具的版本固定在根 `package.json`，包自身的运行时依赖写在对应 manifest 中。使用 pnpm 生成 `pnpm-lock.yaml`，不要手工编辑；依赖生命周期脚本必须在 `pnpm-workspace.yaml` 的 `allowBuilds` 中逐项审批。`just deny` 同时运行 npm 安全审计和 JS 许可证检查。
+
 ## 添加 crate
 
 ```bash

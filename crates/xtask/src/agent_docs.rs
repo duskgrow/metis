@@ -136,8 +136,7 @@ fn check_skill(path: &Path, root: &Path, failures: &mut Vec<String>) {
     let dir_name = path
         .parent()
         .and_then(Path::file_name)
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+        .map_or_default(|name| name.to_string_lossy().into_owned());
     validate_frontmatter(&frontmatter, &rel, &dir_name, failures);
 
     if body.chars().count() > SKILL_BODY_BUDGET_CHARS {
@@ -683,7 +682,7 @@ mod tests {
     #[test]
     fn plain_scalars_parse() {
         let (frontmatter, failures) = parse("name: pr-preflight\ndescription: short\n");
-        assert!(failures.is_empty());
+        assert_eq!(failures, Vec::<String>::new());
         assert_eq!(frontmatter["description"], "short");
     }
 
@@ -691,19 +690,19 @@ mod tests {
     fn plain_scalar_comments_are_stripped_only_at_separation_whitespace() {
         let (frontmatter, failures) =
             parse("name: demo # directory name\ndescription: short # see: details\n");
-        assert!(failures.is_empty());
+        assert_eq!(failures, Vec::<String>::new());
         assert_eq!(frontmatter["name"], "demo");
         assert_eq!(frontmatter["description"], "short");
 
         let (frontmatter, failures) = parse("description: value#part\n");
-        assert!(failures.is_empty());
+        assert_eq!(failures, Vec::<String>::new());
         assert_eq!(frontmatter["description"], "value#part");
     }
 
     #[test]
     fn comment_only_name_and_description_fail_non_empty_validation() {
         let (frontmatter, mut failures) = parse("name: # comment\ndescription: # comment\n");
-        assert!(failures.is_empty());
+        assert_eq!(failures, Vec::<String>::new());
         assert_eq!(frontmatter["name"], "");
         assert_eq!(frontmatter["description"], "");
 
@@ -739,7 +738,7 @@ mod tests {
     #[test]
     fn quoted_colon_space_and_hash_are_preserved() {
         let (frontmatter, failures) = parse("description: \"layer on top: diff # literal\"\n");
-        assert!(failures.is_empty());
+        assert_eq!(failures, Vec::<String>::new());
         assert_eq!(frontmatter["description"], "layer on top: diff # literal");
     }
 
