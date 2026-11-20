@@ -437,10 +437,10 @@ fn real_dsh_entrypoint() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root")
+    // Deliberately not canonicalized: on Windows `canonicalize` returns a
+    // verbatim `\\?\` path, which Node's module loader reduces to the bare
+    // drive root and rejects with EISDIR.
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn read_pid(path: &Path) -> u32 {
