@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { checkLicenseReport } from "./check-js-licenses.mjs";
+import { checkLicenseReport, parseLicenseReport } from "./check-js-licenses.mjs";
 
 function pkg(name) {
   return { name, versions: ["1.0.0"] };
@@ -46,4 +46,11 @@ test("parentheses cannot move an unreviewed license into an OR branch", () => {
 test("stale allowances fail closed", () => {
   const { errors } = checkLicenseReport({ MIT: [pkg("example")] });
   assert.match(errors.join("\n"), /stale JavaScript license allowance/);
+});
+
+test("a Windows pipeline BOM does not break report parsing", () => {
+  assert.deepEqual(
+    parseLicenseReport(`\uFEFF${JSON.stringify(baseReport())}`),
+    baseReport(),
+  );
 });

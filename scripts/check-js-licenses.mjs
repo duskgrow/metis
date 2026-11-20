@@ -57,8 +57,13 @@ export function checkLicenseReport(report, { checkStale = true } = {}) {
   return { errors, packageCount };
 }
 
+export function parseLicenseReport(input) {
+  // PowerShell pipelines prefix a UTF-8 BOM on Windows; JSON.parse rejects it.
+  return JSON.parse(input.replace(/^\uFEFF/, ""));
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const report = JSON.parse(readFileSync(0, "utf8"));
+  const report = parseLicenseReport(readFileSync(0, "utf8"));
   const { errors, packageCount } = checkLicenseReport(report);
   if (errors.length > 0) {
     console.error(`JavaScript license policy failed:\n${errors.map(error => `- ${error}`).join("\n")}`);
