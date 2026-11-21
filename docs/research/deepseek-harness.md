@@ -19,6 +19,8 @@ dsh 的原生 Linux 子进程可以脱离原进程组并交由用户级 systemd 
 
 2026-11-19 在同一环境使用公开发布包验证了私有 Node.js Host：公开 `runProfile` 装配 `dsh-base`、webserver、client-connection 和 Metis 插件，无需 Electron、private Desktop Host 或上游源码投影。Host 不加载 `dsh-web-app` 时根路径返回 404，但公开 BrowserAuth、HTTP RPC、Cordis 事件、智能体创建与销毁、应用级关闭均通过；固定 Node.js 直接启动原 Desktop Host 的 ready、shutdown 和父进程断开路径也已通过。验证尚未覆盖真实模型轮次、跨客户端流式事件与重连；当前完整 CLI 包的依赖闭包仍包含未装载的 Web 组件，发行裁剪不在本次结论内。
 
+2026-11-20 在同一环境为私有 Host 补齐公开 SessionController、API Remotes 及其工作区、文件引用和上传依赖，仍未加载 Web 前端。Node.js 与 Rust 集成测试已验证认证、事件流就绪、会话创建、follow 初始快照、状态读取、取消与关闭；Rust 客户端复用同一认证 Cookie 完成 HTTP 调用和 WebSocket 逻辑流分流，并对认证信息做错误与调试输出脱敏。真实模型闭环随后通过：相同 requestId 的提示词重试只产生一条逻辑消息，流式与持久化助手输出、审批回答和活动 bash 任务取消均符合预期。审批由测试专用 Cordis 插件确定性触发；模型自行构造沙箱升级请求不在该测试的验证范围内。
+
 ## 接入方式
 
 Metis 的私有 Node.js Host 调用公开 `runProfile`，通过 app-owned profile 和 Cordis 插件为 dsh 添加项目、Git 以及主机／项目／会话映射。工作台直接连接该 Host，使用 Harness 的会话、事件、审批和任务能力。

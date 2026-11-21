@@ -14,6 +14,7 @@ use std::{
 
 use metis::{
     Error,
+    client::{ApprovalOutcome, ClientError, DshClient, DshClientConfig, HostEvent},
     runtime::{DshRuntimeConfig, DshSupervisor},
 };
 
@@ -436,6 +437,19 @@ fn real_dsh_entrypoint() -> PathBuf {
     workspace_root().join("packages/metis-host/lib/host.js")
 }
 
+fn approval_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
+    let config = runtime_config(directory, real_dsh_entrypoint());
+    fs::create_dir_all(&config.home).expect("create approval fixture DSH_HOME");
+    let fixture = workspace_root().join("packages/metis-host/test/approval-fixture.js");
+    let fixture = fixture.to_string_lossy().replace('\'', "''");
+    fs::write(
+        config.home.join("cordis.patch.yml"),
+        format!("- insert:\n    - id: metis-test-approval\n      name: '{fixture}'\n"),
+    )
+    .expect("write approval fixture home patch");
+    config
+}
+
 fn workspace_root() -> PathBuf {
     // Deliberately not canonicalized: on Windows `canonicalize` returns a
     // verbatim `\\?\` path, which Node's module loader reduces to the bare
@@ -564,4 +578,523 @@ impl Drop for TestDirectory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+fn bash_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn logical_prompt_message_ids(snapshot: &serde_json::Value, request_id: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for record in snapshot["records"].as_array().into_iter().flatten() {
+        let event = &record["event"];
+        let messages: Vec<&serde_json::Value> = match event["type"].as_str() {
+            Some("user/message") => vec![&event["data"]],
+            Some("agent/inbox/spliced") => event["data"]["inserted"]
+                .as_array()
+                .map_or_default(|messages| messages.iter().collect()),
+            _ => Vec::new(),
+        };
+        for message in messages {
+            if message
+                .pointer("/source/rpcId")
+                .and_then(|value| value.as_str())
+                != Some(request_id)
+            {
+                continue;
+            }
+            let id = message["id"]
+                .as_str()
+                .expect("a prompt record must carry its message id")
+                .to_owned();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+#[test]
+fn prompt_dedup_counts_logical_messages_across_inbox_and_user_events() {
+    let message = serde_json::json!({
+        "id": "message-1",
+        "source": { "kind": "user", "rpcId": "request-1" },
+    });
+    let snapshot = serde_json::json!({ "records": [
+        { "event": { "type": "agent/inbox/spliced", "data": {
+            "inserted": [message.clone()],
+        }}},
+        { "event": { "type": "user/message", "data": message }},
+    ]});
+    assert_eq!(
+        logical_prompt_message_ids(&snapshot, "request-1"),
+        vec!["message-1".to_owned()]
+    );
+
+    let mut duplicate = snapshot;
+    duplicate["records"].as_array_mut().unwrap().push(
+        serde_json::json!({ "event": { "type": "user/message", "data": {
+            "id": "message-2",
+            "source": { "kind": "user", "rpcId": "request-1" },
+        }}}),
+    );
+    assert_eq!(logical_prompt_message_ids(&duplicate, "request-1").len(), 2);
+}
+
+#[tokio::test]
+async fn public_web_client_works_against_real_host_without_a_model() {
+    let directory = TestDirectory::new("public-web-client");
+    let config = runtime_config(&directory, real_dsh_entrypoint());
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .expect("start real Host");
+    let client_config = DshClientConfig {
+        request_timeout: Duration::from_secs(20),
+        stream_open_timeout: Duration::from_secs(20),
+    };
+
+    let invalid_token = "A".repeat(43);
+    let invalid_auth = format!("{}connect?token={invalid_token}", runtime.web_url());
+    let error = DshClient::connect(&invalid_auth, client_config)
+        .await
+        .err()
+        .expect("invalid launch token must be rejected");
+    assert!(matches!(
+        error,
+        ClientError::Authentication { status }
+            if status == reqwest::StatusCode::UNAUTHORIZED
+    ));
+    let rendered = format!("{error:?} {error}");
+    assert!(!rendered.contains(&invalid_token));
+    assert!(!rendered.contains(&invalid_auth));
+
+    let client = DshClient::connect(runtime.auth_url(), client_config)
+        .await
+        .expect("authenticate and receive $events ready");
+    assert_ne!(client.client_id(), "");
+    let session_id = client
+        .create_session(&directory.path.to_string_lossy())
+        .await
+        .expect("create Session without prompting a model");
+    let mut follow = client
+        .follow(&session_id)
+        .await
+        .expect("open Session follow stream");
+    let snapshot = follow
+        .next()
+        .await
+        .expect("read opening snapshot")
+        .expect("snapshot precedes stream end");
+    assert_eq!(snapshot["type"], "snapshot");
+    assert_eq!(snapshot["header"]["id"], session_id);
+    let state = client.state(&session_id).await.expect("read Session state");
+    assert!(state.is_object());
+
+    let missing = client.state("metis-session-that-does-not-exist").await;
+    assert!(matches!(
+        missing,
+        Err(ClientError::Remote { ref code, .. }) if !code.is_empty()
+    ));
+    client
+        .cancel(&session_id)
+        .await
+        .expect("Host accepts cancellation");
+    follow.cancel();
+    client.close().await.expect("close WebSocket task");
+
+    let dropped_client = DshClient::connect(runtime.auth_url(), client_config)
+        .await
+        .expect("connect a client retained for Drop cleanup");
+    let mut retained_follow = dropped_client
+        .follow(&session_id)
+        .await
+        .expect("open follow that outlives its client");
+    let snapshot = retained_follow
+        .next()
+        .await
+        .expect("read retained follow snapshot");
+    assert!(matches!(snapshot, Some(value) if value["type"] == "snapshot"));
+    drop(dropped_client);
+    let closed = tokio::time::timeout(Duration::from_secs(1), retained_follow.next()).await;
+    assert!(
+        matches!(closed, Ok(Err(ClientError::ConnectionClosed))),
+        "dropping the client must terminate a retained follow stream"
+    );
+    runtime.shutdown().expect("stop real Host");
+}
+
+#[tokio::test]
+async fn approval_fixture_round_trip_without_model() {
+    let directory = TestDirectory::new("approval-fixture");
+    let config = approval_runtime_config(&directory);
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .expect("start Host with approval fixture");
+    let mut client = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("connect approval fixture client");
+    let session_id = client
+        .create_session(&directory.path.to_string_lossy())
+        .await
+        .expect("create approval fixture Session");
+    client
+        .prompt(
+            &session_id,
+            "approval-fixture-request",
+            "METIS_TEST_APPROVAL_CANCEL",
+        )
+        .await
+        .expect("admit approval fixture prompt");
+    let approval = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.next_event().await {
+                Ok(HostEvent::Approval(approval)) => break approval,
+                Ok(_) => {}
+                Err(error) => panic!("approval fixture event stream failed: {error}"),
+            }
+        }
+    })
+    .await;
+    let Ok(approval) = approval else {
+        let output = runtime.output_snapshot();
+        eprintln!(
+            "approval fixture markers: loaded={}, requested={}, resolved={}",
+            output.contains("[metis-test] approval fixture loaded"),
+            output.contains("[metis-test] approval requested"),
+            output.contains("[metis-test] approval resolved")
+        );
+        for line in output.lines().filter(|line| line.contains("[metis-test]")) {
+            eprintln!("{line}");
+        }
+        panic!("approval fixture did not deliver an approval");
+    };
+    assert_eq!(approval.agent_id, session_id);
+    assert_eq!(approval.request["toolName"], "bash");
+    client
+        .answer(&approval, ApprovalOutcome::AllowedOnce)
+        .await
+        .expect("answer approval fixture");
+    wait_until(
+        || {
+            runtime
+                .output_snapshot()
+                .contains("[metis-test] approval resolved")
+        },
+        "approval fixture resolution",
+    );
+    client.close().await.expect("close approval fixture client");
+    runtime.shutdown().expect("stop approval fixture Host");
+}
+
+#[tokio::test]
+#[ignore = "requires METIS_TEST_REAL_MODEL=1 and configured dsh model credentials"]
+#[allow(clippy::too_many_lines)]
+async fn real_model_prompt_retry_streams_persists_and_cancels() {
+    const REQUEST_ID: &str = "metis-rust-real-model-request-v1";
+    const SECOND_REQUEST_ID: &str = "metis-rust-real-model-bash-sleep-v1";
+    const MARKER: &str = "METIS_RUST_OK";
+
+    assert_eq!(
+        env::var("METIS_TEST_REAL_MODEL").ok().as_deref(),
+        Some("1"),
+        "explicitly set METIS_TEST_REAL_MODEL=1; model credentials come from the dsh environment"
+    );
+    let directory = TestDirectory::new("real-model-web-client");
+    let config = approval_runtime_config(&directory);
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .unwrap_or_else(|_| panic!("real-model Host startup failed"));
+    let client_config = DshClientConfig {
+        request_timeout: Duration::from_secs(120),
+        stream_open_timeout: Duration::from_secs(30),
+    };
+    let mut client = DshClient::connect(runtime.auth_url(), client_config)
+        .await
+        .unwrap_or_else(|_| panic!("real-model client connection failed"));
+    eprintln!("real-model: client connected");
+    let session_id = client
+        .create_session(&directory.path.to_string_lossy())
+        .await
+        .unwrap_or_else(|_| panic!("real-model Session creation failed"));
+    eprintln!("real-model: session created");
+    let mut follow = client
+        .follow(&session_id)
+        .await
+        .unwrap_or_else(|_| panic!("real-model follow failed"));
+    let opening = follow.next().await;
+    assert!(
+        matches!(opening, Ok(Some(value)) if value["type"] == "snapshot"),
+        "real-model follow omitted its snapshot"
+    );
+
+    for _ in 0..2 {
+        client
+            .prompt(
+                &session_id,
+                REQUEST_ID,
+                "Reply with exactly METIS_RUST_OK and nothing else. Do not use tools.",
+            )
+            .await
+            .unwrap_or_else(|_| panic!("real-model prompt admission failed"));
+    }
+
+    eprintln!("real-model: deduplicated prompt admitted");
+    let mut saw_assistant_chunk = false;
+    let mut saw_persisted_output = false;
+    let mut stream_closed = false;
+    let mut stream_failed = false;
+    let mut frame_count = 0_u64;
+    let mut event_types = Vec::new();
+    let mut assistant_frame_types = Vec::new();
+    let mut turn_end_kinds = Vec::new();
+    let mut failure_codes = Vec::new();
+    let observed = tokio::time::timeout(Duration::from_secs(120), async {
+        while !(saw_assistant_chunk && saw_persisted_output) {
+            let frame = match follow.next().await {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    stream_closed = true;
+                    return false;
+                }
+                Err(_) => {
+                    stream_failed = true;
+                    return false;
+                }
+            };
+            frame_count += 1;
+            if frame["type"] == "assistant-stream" {
+                let kind = frame["frame"]["type"]
+                    .as_str()
+                    .unwrap_or("missing")
+                    .to_owned();
+                if !assistant_frame_types.contains(&kind) {
+                    assistant_frame_types.push(kind);
+                }
+                if frame["frame"]["type"] == "chunk" {
+                    saw_assistant_chunk = true;
+                }
+            }
+            if frame["type"] != "event" {
+                continue;
+            }
+            let event_type = frame["event"]["type"]
+                .as_str()
+                .unwrap_or("missing")
+                .to_owned();
+            if !event_types.contains(&event_type) {
+                event_types.push(event_type.clone());
+            }
+            if event_type == "turn/end" {
+                let kind = frame["event"]["data"]["reason"]["kind"]
+                    .as_str()
+                    .unwrap_or("missing")
+                    .to_owned();
+                turn_end_kinds.push(kind);
+            }
+            for pointer in [
+                "/event/data/error/code",
+                "/event/data/reason/error/code",
+                "/event/data/failure/code",
+            ] {
+                if let Some(code) = frame.pointer(pointer).and_then(|value| value.as_str()) {
+                    failure_codes.push(code.to_owned());
+                }
+            }
+            if event_type == "assistant/message" && frame.to_string().contains(MARKER) {
+                saw_persisted_output = true;
+            }
+            if event_type == "turn/end" && !(saw_assistant_chunk && saw_persisted_output) {
+                return false;
+            }
+        }
+        true
+    })
+    .await;
+    if !matches!(observed, Ok(true)) {
+        eprintln!(
+            "real-model diagnostic: frames={frame_count}, assistant_chunk={saw_assistant_chunk}, persisted_marker={saw_persisted_output}, stream_closed={stream_closed}, stream_failed={stream_failed}"
+        );
+        eprintln!(
+            "real-model diagnostic: event_types={event_types:?}, assistant_frames={assistant_frame_types:?}, turn_ends={turn_end_kinds:?}, failure_codes={failure_codes:?}"
+        );
+        match client.state(&session_id).await {
+            Ok(state) => eprintln!(
+                "real-model diagnostic: running={:?}, pendingInput={:?}, cursor={:?}",
+                state["running"], state["pendingInput"], state["cursor"]
+            ),
+            Err(_) => eprintln!("real-model diagnostic: state query failed"),
+        }
+    }
+    assert!(
+        matches!(observed, Ok(true)),
+        "real-model run did not produce streaming chunks and persisted marker output"
+    );
+    eprintln!("real-model: first streaming and persisted output observed");
+    let first_idle = client
+        .wait(&session_id, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|_| panic!("real-model first idle wait failed"));
+    assert!(
+        first_idle.to_string().contains(MARKER),
+        "real-model marker was absent from first session/wait output"
+    );
+    assert!(
+        first_idle["reason"] == "idle" && first_idle["state"]["running"] == false,
+        "real-model first turn did not reach idle"
+    );
+    follow.cancel();
+    drop(follow);
+    let mut follow = client
+        .follow(&session_id)
+        .await
+        .unwrap_or_else(|_| panic!("real-model follow reopen failed"));
+    let Ok(Some(snapshot)) = follow.next().await else {
+        panic!("real-model reopened follow omitted its snapshot");
+    };
+    assert!(
+        snapshot["type"] == "snapshot" && snapshot["hasMore"] == false,
+        "real-model reopened follow did not contain a complete snapshot"
+    );
+    let prompt_message_ids = logical_prompt_message_ids(&snapshot, REQUEST_ID);
+    assert_eq!(
+        prompt_message_ids.len(),
+        1,
+        "real-model requestId produced multiple logical messages in the complete snapshot"
+    );
+    eprintln!("real-model: first turn idle and prompt deduplication confirmed");
+
+    let marker_path = directory.path.join("bash-tool-started.marker");
+    assert!(
+        !marker_path.exists(),
+        "real-model bash marker existed before the second prompt"
+    );
+    let bash_command = format!(
+        "touch {} && sleep 60",
+        bash_quote(&marker_path.to_string_lossy())
+    );
+    let second_prompt = format!(
+        "METIS_TEST_APPROVAL. Call the bash tool exactly once to execute this command unchanged: `{bash_command}`. This tool call is mandatory. Do not call any other tool, do not execute any other command, and do not give a final response until the sleep finishes."
+    );
+    client
+        .prompt(&session_id, SECOND_REQUEST_ID, &second_prompt)
+        .await
+        .unwrap_or_else(|_| panic!("real-model bash-sleep prompt admission failed"));
+    eprintln!("real-model: bash prompt admitted; waiting for approval");
+    let mut second_event_types = Vec::new();
+    let mut second_host_events = Vec::new();
+    let approval = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            tokio::select! {
+                event = client.next_event() => {
+                    match event {
+                        Ok(HostEvent::Approval(approval)) => break Some(approval),
+                        Ok(HostEvent::Emit { event, .. }) => {
+                            if !second_host_events.contains(&event) {
+                                second_host_events.push(event);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(_) => break None,
+                    }
+                }
+                frame = follow.next() => {
+                    match frame {
+                        Ok(Some(frame)) => {
+                            let kind = if frame["type"] == "event" {
+                                frame["event"]["type"].as_str().unwrap_or("missing")
+                            } else {
+                                frame["type"].as_str().unwrap_or("missing")
+                            }.to_owned();
+                            if !second_event_types.contains(&kind) {
+                                second_event_types.push(kind);
+                            }
+                        }
+                        Ok(None) | Err(_) => break None,
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    let Ok(Some(approval)) = approval else {
+        eprintln!(
+            "real-model diagnostic: approval wait ended with marker_created={}, event_types={second_event_types:?}, host_events={second_host_events:?}",
+            marker_path.exists()
+        );
+        match client.state(&session_id).await {
+            Ok(state) => eprintln!(
+                "real-model diagnostic: approval wait state running={:?}, pendingInput={:?}, cursor={:?}",
+                state["running"], state["pendingInput"], state["cursor"]
+            ),
+            Err(_) => eprintln!("real-model diagnostic: approval wait state query failed"),
+        }
+        panic!("real-model bash-sleep prompt did not produce an approval");
+    };
+    assert!(
+        approval.agent_id == session_id,
+        "real-model approval agentId did not match the Session"
+    );
+    assert!(
+        approval.request["toolName"] == "bash",
+        "real-model approval was not for the bash tool"
+    );
+    eprintln!("real-model: bash approval received");
+    client
+        .answer(&approval, ApprovalOutcome::AllowedOnce)
+        .await
+        .unwrap_or_else(|_| panic!("real-model approval answer failed"));
+    eprintln!("real-model: approval accepted; waiting for bash startup");
+
+    // No more follow data is needed. Cancel the observation stream so its
+    // bounded queue cannot overflow while approval and cancellation continue.
+    follow.cancel();
+    let bash_started = tokio::time::timeout(Duration::from_secs(30), async {
+        while !marker_path.exists() {
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                event = client.next_event() => {
+                    if event.is_err() {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    })
+    .await;
+    assert!(
+        matches!(bash_started, Ok(true)),
+        "real-model approval answer did not start the bash command"
+    );
+    eprintln!("real-model: bash started; cancelling active turn");
+    if let Err(error) = client.cancel(&session_id).await {
+        eprintln!("real-model diagnostic: cancellation error={error}");
+        match client.state(&session_id).await {
+            Ok(state) => eprintln!(
+                "real-model diagnostic: cancellation state running={:?}, pendingInput={:?}, cursor={:?}",
+                state["running"], state["pendingInput"], state["cursor"]
+            ),
+            Err(state_error) => {
+                eprintln!("real-model diagnostic: cancellation state error={state_error}");
+            }
+        }
+        panic!("real-model bash-sleep cancellation failed");
+    }
+    let final_idle = client
+        .wait(&session_id, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|_| panic!("real-model final idle wait failed"));
+    assert!(
+        final_idle["reason"] == "idle" && final_idle["state"]["running"] == false,
+        "real-model cancelled bash-sleep task did not reach idle"
+    );
+    eprintln!("real-model: cancelled turn reached idle");
+    client
+        .close()
+        .await
+        .unwrap_or_else(|_| panic!("real-model client shutdown failed"));
+    runtime
+        .shutdown()
+        .unwrap_or_else(|_| panic!("real-model Host shutdown failed"));
 }
