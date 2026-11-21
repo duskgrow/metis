@@ -53,7 +53,7 @@ async function launch(t) {
     await exited;
     await rm(home, { recursive: true, force: true });
   });
-  return { child, exited, logs: () => logs, ready };
+  return { child, exited, home, logs: () => logs, ready };
 }
 
 async function waitReady(host) {
@@ -66,6 +66,26 @@ async function waitReady(host) {
     `host exited before ready: ${JSON.stringify(result)}\n${host.logs()}`,
   );
   return result;
+}
+
+async function postRpc(webUrl, cookie, method, request) {
+  const rpcId = `metis-host-test:${method}`;
+  const response = await fetch(new URL(`/api/${method}`, webUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({
+      type: "client-request",
+      rpcId,
+      method,
+      payload: { args: { request } },
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  assert.equal(response.status, 200);
+  const envelope = await response.json();
+  assert.equal(envelope.type, "server-response");
+  assert.equal(envelope.rpcId, rpcId);
+  return envelope;
 }
 
 test("the private host boots public dsh capabilities without a frontend", {
@@ -85,7 +105,21 @@ test("the private host boots public dsh capabilities without a frontend", {
     signal: AbortSignal.timeout(10_000),
   });
   assert.equal(connect.status, 302);
-  assert.ok(connect.headers.get("set-cookie"));
+  const setCookie = connect.headers.get("set-cookie");
+  assert.ok(setCookie);
+  const cookie = setCookie.split(";", 1)[0];
+  assert.ok(cookie.includes("="));
+
+  const created = await postRpc(webUrl, cookie, "session/create", {
+    cwd: host.home,
+  });
+  assert.equal(created.result.ok, true, JSON.stringify(created.result));
+  assert.equal(typeof created.result.value.sessionId, "string");
+
+  const cancelled = await postRpc(webUrl, cookie, "session/cancel", {
+    sessionId: created.result.value.sessionId,
+  });
+  assert.deepEqual(cancelled.result, { ok: true, value: { accepted: true } });
 
   const invalidAuth = new URL("/connect", webUrl);
   invalidAuth.searchParams.set("token", "A".repeat(43));
