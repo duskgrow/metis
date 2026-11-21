@@ -110,8 +110,22 @@ test("the private host boots public dsh capabilities without a frontend", {
   const cookie = setCookie.split(";", 1)[0];
   assert.ok(cookie.includes("="));
 
+  const opened = await postRpc(webUrl, cookie, "project/open", {
+    path: host.home,
+  });
+  assert.equal(opened.result.ok, true, JSON.stringify(opened.result));
+  assert.equal(opened.result.value.path, host.home);
+  assert.equal(typeof opened.result.value.projectId, "string");
+
+  const read = await postRpc(webUrl, cookie, "project/read", {
+    projectId: opened.result.value.projectId,
+    path: "host-profile/package.json",
+  });
+  assert.equal(read.result.ok, true, JSON.stringify(read.result));
+  assert.match(read.result.value.content, /metis-private-host/u);
+
   const created = await postRpc(webUrl, cookie, "session/create", {
-    cwd: host.home,
+    workspaceId: opened.result.value.projectId,
   });
   assert.equal(created.result.ok, true, JSON.stringify(created.result));
   assert.equal(typeof created.result.value.sessionId, "string");

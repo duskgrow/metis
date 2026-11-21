@@ -584,6 +584,31 @@ fn bash_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn run_git(project: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .expect("run test Git command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn create_session_at(client: &DshClient, directory: &Path) -> String {
+    let project = client
+        .open_project(&directory.to_string_lossy())
+        .await
+        .expect("open Session project");
+    client
+        .create_session(&project.project_id)
+        .await
+        .expect("create project-attached Session")
+}
+
 fn logical_prompt_message_ids(snapshot: &serde_json::Value, request_id: &str) -> Vec<String> {
     let mut ids = Vec::new();
     for record in snapshot["records"].as_array().into_iter().flatten() {
@@ -673,10 +698,7 @@ async fn public_web_client_works_against_real_host_without_a_model() {
         .await
         .expect("authenticate and receive $events ready");
     assert_ne!(client.client_id(), "");
-    let session_id = client
-        .create_session(&directory.path.to_string_lossy())
-        .await
-        .expect("create Session without prompting a model");
+    let session_id = create_session_at(&client, &directory.path).await;
     let mut follow = client
         .follow(&session_id)
         .await
@@ -725,6 +747,242 @@ async fn public_web_client_works_against_real_host_without_a_model() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn project_and_git_workflows_use_real_host() {
+    let directory = TestDirectory::new("project-git");
+    let project = directory.path.join("repo");
+    fs::create_dir(&project).expect("create Git project");
+    fs::write(project.join("tracked.txt"), "before\n").expect("write tracked file");
+    fs::write(project.join("deleted.txt"), "delete me\n").expect("write deleted file");
+    fs::write(project.join("rename-old.txt"), "rename me\n").expect("write renamed file");
+    run_git(&project, &["init", "--quiet"]);
+    run_git(&project, &["config", "user.name", "Metis Test"]);
+    run_git(&project, &["config", "user.email", "metis@example.invalid"]);
+    run_git(&project, &["add", "--", "."]);
+    run_git(&project, &["commit", "--quiet", "-m", "initial"]);
+
+    let outside = directory.write("outside.txt", "outside\n");
+    let config = runtime_config(&directory, real_dsh_entrypoint());
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .expect("start real Host for project and Git calls");
+    let client = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("connect project and Git client");
+
+    let opened = client
+        .open_project(&project.to_string_lossy())
+        .await
+        .expect("open real Git project");
+    assert_eq!(Path::new(&opened.path).file_name().unwrap(), "repo");
+    assert_eq!(opened.recent_session_ids, Vec::<String>::new());
+    assert!(!opened.has_more_sessions);
+    let reopened = client
+        .open_project(&project.join(".").to_string_lossy())
+        .await
+        .expect("reopening a canonical project is idempotent");
+    assert_eq!(reopened.project_id, opened.project_id);
+    let current = client
+        .get_project(&opened.project_id)
+        .await
+        .expect("get opened project");
+    assert_eq!(current.project_id, opened.project_id);
+    assert_eq!(
+        client
+            .git_status(&opened.project_id)
+            .await
+            .expect("clean status"),
+        ""
+    );
+    assert_eq!(
+        client
+            .git_diff(&opened.project_id)
+            .await
+            .expect("clean diff"),
+        ""
+    );
+
+    let file = client
+        .read_project_file(&opened.project_id, "tracked.txt")
+        .await
+        .expect("read project file");
+    assert_eq!(file, "before\n");
+    let session_id = client
+        .create_session(&opened.project_id)
+        .await
+        .expect("create Session attached to project");
+    let current = client
+        .get_project(&opened.project_id)
+        .await
+        .expect("get project with attached Session");
+    assert_eq!(current.recent_session_ids, vec![session_id]);
+
+    let outside_path = outside.to_string_lossy().into_owned();
+    for path in ["../outside.txt", outside_path.as_str()] {
+        let error = client
+            .read_project_file(&opened.project_id, path)
+            .await
+            .expect_err("project escapes must be rejected");
+        assert!(
+            matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
+            "unexpected path escape error: {error}"
+        );
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, project.join("outside-link.txt"))
+            .expect("create external symlink");
+        let error = client
+            .read_project_file(&opened.project_id, "outside-link.txt")
+            .await
+            .expect_err("external symlinks must be rejected");
+        assert!(
+            matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
+            "unexpected symlink escape error: {error}"
+        );
+    }
+
+    fs::remove_file(project.join("deleted.txt")).expect("delete tracked file");
+    fs::rename(
+        project.join("rename-old.txt"),
+        project.join("rename-new.txt"),
+    )
+    .expect("rename tracked file");
+    fs::write(project.join("added.txt"), "new file\n").expect("write new file");
+    fs::write(project.join("tracked.txt"), "after\n").expect("stage tracked modification");
+    run_git(&project, &["add", "-A"]);
+    fs::write(project.join("tracked.txt"), "after\nstaged and unstaged\n")
+        .expect("modify tracked file");
+
+    let status = client
+        .git_status(&opened.project_id)
+        .await
+        .expect("read real Git status");
+    let entries: Vec<&str> = status.split('\0').collect();
+    assert!(entries.contains(&"A  added.txt"), "status: {status:?}");
+    assert!(entries.contains(&"D  deleted.txt"), "status: {status:?}");
+    assert!(entries.contains(&"R  rename-new.txt"), "status: {status:?}");
+    assert!(entries.contains(&"rename-old.txt"), "status: {status:?}");
+    assert!(entries.contains(&"MM tracked.txt"), "status: {status:?}");
+
+    let patch = client
+        .git_diff(&opened.project_id)
+        .await
+        .expect("read real Git patch");
+    assert!(patch.contains("new file mode"), "patch: {patch}");
+    assert!(patch.contains("deleted file mode"), "patch: {patch}");
+    assert!(
+        patch.contains("rename from rename-old.txt"),
+        "patch: {patch}"
+    );
+    assert!(patch.contains("rename to rename-new.txt"), "patch: {patch}");
+    assert!(patch.contains("+staged and unstaged"), "patch: {patch}");
+
+    let unborn = directory.path.join("unborn");
+    fs::create_dir(&unborn).expect("create unborn Git project");
+    run_git(&unborn, &["init", "--quiet"]);
+    let unborn_project = client
+        .open_project(&unborn.to_string_lossy())
+        .await
+        .expect("open unborn Git project");
+    assert_eq!(
+        client
+            .git_status(&unborn_project.project_id)
+            .await
+            .expect("empty unborn status"),
+        ""
+    );
+    assert_eq!(
+        client
+            .git_diff(&unborn_project.project_id)
+            .await
+            .expect("empty unborn diff"),
+        ""
+    );
+    fs::write(unborn.join("first.txt"), "first\n").expect("write first unborn file");
+    run_git(&unborn, &["add", "--", "first.txt"]);
+    let patch = client
+        .git_diff(&unborn_project.project_id)
+        .await
+        .expect("diff staged file against the empty tree");
+    assert!(patch.contains("new file mode"), "patch: {patch}");
+    assert!(patch.contains("+first"), "patch: {patch}");
+
+    fs::write(project.join("too-large.txt"), vec![b'x'; 513 * 1024])
+        .expect("write oversized text file");
+    let error = client
+        .read_project_file(&opened.project_id, "too-large.txt")
+        .await
+        .expect_err("oversized files must be rejected");
+    assert!(
+        matches!(error, ClientError::Remote { ref code, .. } if code == "project/read-failed"),
+        "unexpected oversized-file error: {error}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+        let fifo = project.join("fifo");
+        let status = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("create project FIFO");
+        assert!(status.success());
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.read_project_file(&opened.project_id, "fifo"),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(ClientError::Remote { ref code, .. })) if code == "project/read-failed"),
+            "FIFO must reject promptly: {result:?}"
+        );
+
+        let invalid_name = OsString::from_vec(vec![b'f', 0xff]);
+        fs::write(project.join(invalid_name), "invalid UTF-8 name\n")
+            .expect("write non-UTF-8 filename");
+        let error = client
+            .git_status(&opened.project_id)
+            .await
+            .expect_err("non-UTF-8 Git output must not be lossy");
+        assert!(
+            matches!(error, ClientError::Remote { ref code, .. } if code == "git/command-failed"),
+            "unexpected non-UTF-8 Git error: {error}"
+        );
+
+        let replaced = directory.path.join("replaced");
+        fs::create_dir(&replaced).expect("create replaceable project");
+        let replaced_project = client
+            .open_project(&replaced.to_string_lossy())
+            .await
+            .expect("open replaceable project");
+        fs::rename(&replaced, directory.path.join("moved")).expect("move project root");
+        std::os::unix::fs::symlink(&directory.path, &replaced)
+            .expect("replace project root with an external symlink");
+        let error = client
+            .read_project_file(&replaced_project.project_id, "outside.txt")
+            .await
+            .expect_err("replacement project roots must be rejected");
+        assert!(
+            matches!(error, ClientError::Remote { ref code, .. } if code == "project/unavailable"),
+            "unexpected replacement-root error: {error}"
+        );
+    }
+
+    let error = client
+        .git_status("missing-project")
+        .await
+        .expect_err("unknown projects must not reach Git");
+    assert!(
+        matches!(error, ClientError::Remote { ref code, .. } if code == "project/not-found"),
+        "unexpected unknown-project error: {error}"
+    );
+    client.close().await.expect("close project and Git client");
+    runtime.shutdown().expect("stop project and Git Host");
+}
+
+#[tokio::test]
 async fn approval_fixture_round_trip_without_model() {
     let directory = TestDirectory::new("approval-fixture");
     let config = approval_runtime_config(&directory);
@@ -734,10 +992,7 @@ async fn approval_fixture_round_trip_without_model() {
     let mut client = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
         .await
         .expect("connect approval fixture client");
-    let session_id = client
-        .create_session(&directory.path.to_string_lossy())
-        .await
-        .expect("create approval fixture Session");
+    let session_id = create_session_at(&client, &directory.path).await;
     client
         .prompt(
             &session_id,
@@ -813,10 +1068,7 @@ async fn real_model_prompt_retry_streams_persists_and_cancels() {
         .await
         .unwrap_or_else(|_| panic!("real-model client connection failed"));
     eprintln!("real-model: client connected");
-    let session_id = client
-        .create_session(&directory.path.to_string_lossy())
-        .await
-        .unwrap_or_else(|_| panic!("real-model Session creation failed"));
+    let session_id = create_session_at(&client, &directory.path).await;
     eprintln!("real-model: session created");
     let mut follow = client
         .follow(&session_id)

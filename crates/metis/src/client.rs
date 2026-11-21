@@ -113,6 +113,21 @@ pub enum ClientError {
 /// Convenience alias for dsh client operations.
 pub type ClientResult<T> = std::result::Result<T, ClientError>;
 
+/// A project known to the Host, including a bounded recent Session summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Project {
+    /// Host-assigned project identity.
+    pub project_id: String,
+    /// Project path on the Host.
+    pub path: String,
+    /// Human-readable project title.
+    pub title: String,
+    /// Most recent Sessions associated with the project.
+    pub recent_session_ids: Vec<String>,
+    /// Whether older associated Sessions exist beyond this summary.
+    pub has_more_sessions: bool,
+}
+
 /// One approval delivered by the answering `$events` generation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalRequest {
@@ -329,19 +344,67 @@ impl DshClient {
         &self.client_id
     }
 
-    /// Create or reuse a Session at `cwd` and return its Host-assigned identity.
-    pub async fn create_session(&self, cwd: &str) -> ClientResult<String> {
+    /// Create or reuse a Session attached to `project_id`.
+    pub async fn create_session(&self, project_id: &str) -> ClientResult<String> {
         let value = self
-            .rpc("session/create", json!({ "request": { "cwd": cwd } }))
+            .rpc(
+                "session/create",
+                json!({ "request": { "workspaceId": project_id } }),
+            )
             .await?;
-        value
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_owned)
-            .ok_or(ClientError::Protocol(
-                "session/create response omitted sessionId",
-            ))
+        parse_session_id(&value)
+    }
+
+    /// Open the project at `path` and return its current Host metadata.
+    pub async fn open_project(&self, path: &str) -> ClientResult<Project> {
+        let value = self
+            .rpc("project/open", json!({ "request": { "path": path } }))
+            .await?;
+        parse_project(&value)
+    }
+
+    /// Read one project's current metadata and recent Session summary.
+    pub async fn get_project(&self, project_id: &str) -> ClientResult<Project> {
+        let value = self
+            .rpc(
+                "project/get",
+                json!({ "request": { "projectId": project_id } }),
+            )
+            .await?;
+        parse_project(&value)
+    }
+
+    /// Read one UTF-8 file from a Host project and return its content.
+    pub async fn read_project_file(&self, project_id: &str, path: &str) -> ClientResult<String> {
+        let value = self
+            .rpc(
+                "project/read",
+                json!({ "request": { "projectId": project_id, "path": path } }),
+            )
+            .await?;
+        required_text(&value, "content", "project/read response omitted content")
+    }
+
+    /// Return the project's UTF-8 porcelain-v1, NUL-delimited Git status.
+    pub async fn git_status(&self, project_id: &str) -> ClientResult<String> {
+        let value = self
+            .rpc(
+                "git/status",
+                json!({ "request": { "projectId": project_id } }),
+            )
+            .await?;
+        required_text(&value, "status", "git/status response omitted status")
+    }
+
+    /// Return the project's UTF-8 Git diff patch.
+    pub async fn git_diff(&self, project_id: &str) -> ClientResult<String> {
+        let value = self
+            .rpc(
+                "git/diff",
+                json!({ "request": { "projectId": project_id } }),
+            )
+            .await?;
+        required_text(&value, "patch", "git/diff response omitted patch")
     }
 
     /// Queue a text prompt. The caller owns `request_id`; retries can reuse it unchanged.
@@ -795,6 +858,49 @@ fn expect_accepted(value: &Value, message: &'static str) -> ClientResult<()> {
     }
 }
 
+fn parse_session_id(value: &Value) -> ClientResult<String> {
+    required_string_with_message(
+        value,
+        "sessionId",
+        "session/create response omitted sessionId",
+    )
+}
+
+fn parse_project(value: &Value) -> ClientResult<Project> {
+    let recent_session_ids = value
+        .get("recentSessionIds")
+        .and_then(Value::as_array)
+        .ok_or(ClientError::Protocol(
+            "project response omitted recentSessionIds",
+        ))?
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or(ClientError::Protocol(
+                    "project response contained an invalid sessionId",
+                ))
+        })
+        .collect::<ClientResult<Vec<_>>>()?;
+    Ok(Project {
+        project_id: required_string_with_message(
+            value,
+            "projectId",
+            "project response omitted projectId",
+        )?,
+        path: required_string_with_message(value, "path", "project response omitted path")?,
+        title: required_string_with_message(value, "title", "project response omitted title")?,
+        recent_session_ids,
+        has_more_sessions: value
+            .get("hasMoreSessions")
+            .and_then(Value::as_bool)
+            .ok_or(ClientError::Protocol(
+                "project response omitted hasMoreSessions",
+            ))?,
+    })
+}
+
 fn parse_ready_client_id(value: &Value) -> ClientResult<String> {
     if value.get("type").and_then(Value::as_str) != Some("ready") {
         return Err(ClientError::Protocol("$events did not open with ready"));
@@ -849,15 +955,29 @@ fn parse_host_event(value: &Value, client_id: &str) -> ClientResult<HostEvent> {
     }
 }
 
+fn required_text(value: &Value, key: &str, message: &'static str) -> ClientResult<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or(ClientError::Protocol(message))
+}
+
 fn required_string(value: &Value, key: &str) -> ClientResult<String> {
+    required_string_with_message(value, key, "event frame omitted a required string")
+}
+
+fn required_string_with_message(
+    value: &Value,
+    key: &str,
+    message: &'static str,
+) -> ClientResult<String> {
     value
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .ok_or(ClientError::Protocol(
-            "event frame omitted a required string",
-        ))
+        .ok_or(ClientError::Protocol(message))
 }
 
 const STREAM_CAPACITY: usize = 64;
@@ -1322,6 +1442,57 @@ mod tests {
             }
         );
         server.join().expect("test HTTP server must finish");
+    }
+
+    #[test]
+    fn project_response_parses_metadata_and_sessions() {
+        let project = parse_project(&json!({
+            "projectId": "project-1",
+            "path": "/workspace/project",
+            "title": "Project",
+            "recentSessionIds": ["session-1", "session-2"],
+            "hasMoreSessions": false,
+        }))
+        .expect("valid project response");
+        assert_eq!(
+            project,
+            Project {
+                project_id: "project-1".into(),
+                path: "/workspace/project".into(),
+                title: "Project".into(),
+                recent_session_ids: vec!["session-1".into(), "session-2".into()],
+                has_more_sessions: false,
+            }
+        );
+    }
+
+    #[test]
+    fn project_response_rejects_empty_strings_and_invalid_session_ids() {
+        let empty_id = json!({
+            "projectId": "",
+            "path": "/workspace/project",
+            "title": "Project",
+            "recentSessionIds": [],
+            "hasMoreSessions": false,
+        });
+        assert_eq!(
+            parse_project(&empty_id),
+            Err(ClientError::Protocol("project response omitted projectId"))
+        );
+
+        let invalid_session = json!({
+            "projectId": "project-1",
+            "path": "/workspace/project",
+            "title": "Project",
+            "recentSessionIds": ["session-1", 7],
+            "hasMoreSessions": false,
+        });
+        assert_eq!(
+            parse_project(&invalid_session),
+            Err(ClientError::Protocol(
+                "project response contained an invalid sessionId"
+            ))
+        );
     }
 
     #[test]
