@@ -419,6 +419,16 @@ impl DshClient {
         expect_accepted(&value, "session/prompt response was not accepted")
     }
 
+    /// Rename a Session and wait for the Host to commit the title event.
+    pub async fn rename_session(&self, session_id: &str, title: &str) -> ClientResult<()> {
+        self.rpc(
+            "session/rename",
+            json!({ "request": { "sessionId": session_id, "title": title } }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Request cancellation of the active turn.
     ///
     /// Success means cancellation was accepted by the live Agent, not that the turn has
@@ -442,6 +452,30 @@ impl DshClient {
         .await
     }
 
+    /// Read an older durable Session page ending at inclusive `through_seq`.
+    /// `before_seq` excludes records at or above that sequence from the page.
+    pub async fn session_page(
+        &self,
+        session_id: &str,
+        through_seq: i64,
+        before_seq: Option<i64>,
+    ) -> ClientResult<Value> {
+        let mut request = json!({
+            "address": { "kind": "session", "sessionId": session_id },
+            "throughSeq": through_seq,
+        });
+        if let Some(before_seq) = before_seq {
+            request
+                .as_object_mut()
+                .ok_or(ClientError::Protocol(
+                    "failed to build Session page request",
+                ))?
+                .insert("beforeSeq".to_owned(), json!(before_seq));
+        }
+        self.rpc("session/page", json!({ "request": request }))
+            .await
+    }
+
     /// Wait for idle, required input, or the server-side deadline and return raw JSON.
     pub async fn wait(&self, session_id: &str, wait_timeout: Duration) -> ClientResult<Value> {
         let timeout_ms = u64::try_from(wait_timeout.as_millis()).unwrap_or(u64::MAX);
@@ -457,15 +491,45 @@ impl DshClient {
     /// The first item is guaranteed to be a `snapshot`; later items retain `event` and
     /// `assistant-stream` JSON unchanged.
     pub async fn follow(&self, session_id: &str) -> ClientResult<DshStream> {
+        self.follow_with_options(session_id, None).await
+    }
+
+    /// Open a follow whose snapshot budgets at most `max_messages` messages.
+    /// Non-message records ride along with that window and are not separately capped.
+    pub async fn follow_with_limit(
+        &self,
+        session_id: &str,
+        max_messages: u64,
+    ) -> ClientResult<DshStream> {
+        if max_messages == 0 {
+            return Err(ClientError::Protocol(
+                "Session follow message limit must be positive",
+            ));
+        }
+        self.follow_with_options(session_id, Some(max_messages))
+            .await
+    }
+
+    async fn follow_with_options(
+        &self,
+        session_id: &str,
+        max_messages: Option<u64>,
+    ) -> ClientResult<DshStream> {
+        let mut request = json!({
+            "address": { "kind": "session", "sessionId": session_id },
+            "activate": true,
+            "assistantStream": true,
+        });
+        if let Some(max_messages) = max_messages {
+            request
+                .as_object_mut()
+                .ok_or(ClientError::Protocol(
+                    "failed to build Session follow request",
+                ))?
+                .insert("maxMessages".to_owned(), json!(max_messages));
+        }
         let stream = self
-            .open_stream(
-                "session/follow",
-                json!({ "request": {
-                    "address": { "kind": "session", "sessionId": session_id },
-                    "activate": true,
-                    "assistantStream": true,
-                }}),
-            )
+            .open_stream("session/follow", json!({ "request": request }))
             .await?;
         if stream
             .opening

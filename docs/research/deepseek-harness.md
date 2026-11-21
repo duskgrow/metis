@@ -25,6 +25,18 @@ dsh 的原生 Linux 子进程可以脱离原进程组并交由用户级 systemd 
 
 文件路径同时做词法与 realpath 包含检查，测试确认父目录跳转、绝对路径、指向项目外的符号链接和被替换的项目根均被拒绝。文件通过文件句柄读取，拒绝非普通文件并在限定字节数处停止；Host 的文本预算与 Rust 客户端的响应上限可容纳 JSON 最坏转义，非法 UTF-8 会报错而不会替换字符。认证客户端代表主机用户选择项目根，这些检查约束打开后的操作，不构成对同一用户进程主动竞态修改文件系统的沙箱；该对抗场景与远程细粒度授权仍属于认证和项目路径边界验收。
 
+2026-11-21 同一认证入口为两个 Rust 客户端签发独立 Peer 和 `$events` clientId。实测两条 `session/follow` 各自收到相同持久事件，一个客户端直接断开后由另一个客户端连续写入事件，重连快照覆盖断开期间的事件。`session/follow` 不接受 afterSeq 续传参数，快照是带 hasMore 的历史窗口而非完整日志后缀；Rust SessionJournal 以 Replace 发布快照窗口，通过 session/page 向前 prepend 旧页，再以 event.seq 衔接 live Append、去重并拒绝跳号与游标倒退。真实 Host 以受限消息窗口验证了 hasMore 和固定切点逐页 prepend，分页单元测试另覆盖重连后旧游标不再位于快照窗口的情况。审批同时分发到两个客户端，首次回答生效，另一个客户端收到同一 eventId 的取消；迟到回答后的最终快照仍只有一个持久决定。测试同时核对了 inbox 与 user/message 合起来的逻辑提示词只出现一次、两个客户端事件序列一致以及取消后的任务状态。
+
+同一 DSH_HOME 的正常关闭与重启测试形成以下恢复矩阵。活动 turn、assistant chunk 和后台 bash 由测试专用公开适配器与 jobs 接口确定性产生，不依赖真实模型。
+
+| 状态                            | 正常关闭并重启后的实测结果                                                                  |
+| ------------------------------- | ------------------------------------------------------------------------------------------- |
+| 项目、Session header 与事件日志 | 保留原身份并恢复，逻辑消息和 requestId 去重记录不重复                                       |
+| 活动 Agent 与 turn              | 不继续运行；冷状态为 inactive、not running                                                  |
+| assistant 输出                  | 已交付内容随持久结算保留，旧 activeAttempt 和实时帧不 replay                                |
+| 后台 bash 与 job registry       | 进程停止，恢复后的 registry 为空；job/registered 保留，job/settled 仍按上游实际结算情况存在 |
+| 待处理审批                      | 关闭时写入 decided(unavailable)，重启后不重发；新 Rust 客户端在本地拒绝旧 clientId          |
+
 ## 接入方式
 
 Metis 的私有 Node.js Host 调用公开 `runProfile`，通过 app-owned profile 和 Cordis 插件为 dsh 添加项目、Git 以及主机／项目／会话映射。工作台直接连接该 Host，使用 Harness 的会话、事件、审批和任务能力。

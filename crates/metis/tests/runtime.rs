@@ -14,7 +14,11 @@ use std::{
 
 use metis::{
     Error,
-    client::{ApprovalOutcome, ClientError, DshClient, DshClientConfig, HostEvent},
+    client::{
+        ApprovalOutcome, ApprovalRequest, ClientError, DshClient, DshClientConfig, DshStream,
+        HostEvent,
+    },
+    journal::SessionJournal,
     runtime::{DshRuntimeConfig, DshSupervisor},
 };
 
@@ -438,15 +442,25 @@ fn real_dsh_entrypoint() -> PathBuf {
 }
 
 fn approval_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
+    fixture_runtime_config(directory, "approval-fixture.js")
+}
+
+fn restart_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
+    fixture_runtime_config(directory, "restart-fixture.js")
+}
+
+fn fixture_runtime_config(directory: &TestDirectory, fixture: &str) -> DshRuntimeConfig {
     let config = runtime_config(directory, real_dsh_entrypoint());
-    fs::create_dir_all(&config.home).expect("create approval fixture DSH_HOME");
-    let fixture = workspace_root().join("packages/metis-host/test/approval-fixture.js");
+    fs::create_dir_all(&config.home).expect("create fixture DSH_HOME");
+    let fixture = workspace_root()
+        .join("packages/metis-host/test")
+        .join(fixture);
     let fixture = fixture.to_string_lossy().replace('\'', "''");
     fs::write(
         config.home.join("cordis.patch.yml"),
-        format!("- insert:\n    - id: metis-test-approval\n      name: '{fixture}'\n"),
+        format!("- insert:\n    - id: metis-test-fixture\n      name: '{fixture}'\n"),
     )
-    .expect("write approval fixture home patch");
+    .expect("write fixture home patch");
     config
 }
 
@@ -609,10 +623,71 @@ async fn create_session_at(client: &DshClient, directory: &Path) -> String {
         .expect("create project-attached Session")
 }
 
+async fn next_stream_frame(stream: &mut DshStream) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("timed out waiting for Session stream")
+        .expect("read Session stream")
+        .expect("Session stream ended unexpectedly")
+}
+
+async fn next_snapshot(stream: &mut DshStream) -> serde_json::Value {
+    let snapshot = next_stream_frame(stream).await;
+    assert_eq!(snapshot["type"], "snapshot");
+    snapshot
+}
+
+async fn apply_through(
+    stream: &mut DshStream,
+    journal: &mut SessionJournal,
+    event_type: &str,
+) -> Vec<serde_json::Value> {
+    let mut delivered = Vec::new();
+    loop {
+        let frame = next_stream_frame(stream).await;
+        let events = journal
+            .apply(&frame)
+            .expect("apply ordered Session frame")
+            .into_events();
+        let found = events
+            .iter()
+            .any(|event| event["type"].as_str() == Some(event_type));
+        delivered.extend(events);
+        if found {
+            return delivered;
+        }
+    }
+}
+
+async fn next_approval(client: &mut DshClient) -> ApprovalRequest {
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), client.next_event())
+            .await
+            .expect("timed out waiting for Host approval")
+            .expect("read Host event");
+        if let HostEvent::Approval(approval) = event {
+            return approval;
+        }
+    }
+}
+
 fn logical_prompt_message_ids(snapshot: &serde_json::Value, request_id: &str) -> Vec<String> {
+    logical_prompt_event_ids(
+        snapshot["records"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|record| &record["event"]),
+        request_id,
+    )
+}
+
+fn logical_prompt_event_ids<'a>(
+    events: impl IntoIterator<Item = &'a serde_json::Value>,
+    request_id: &str,
+) -> Vec<String> {
     let mut ids = Vec::new();
-    for record in snapshot["records"].as_array().into_iter().flatten() {
-        let event = &record["event"];
+    for event in events {
         let messages: Vec<&serde_json::Value> = match event["type"].as_str() {
             Some("user/message") => vec![&event["data"]],
             Some("agent/inbox/spliced") => event["data"]["inserted"]
@@ -980,6 +1055,564 @@ async fn project_and_git_workflows_use_real_host() {
     );
     client.close().await.expect("close project and Git client");
     runtime.shutdown().expect("stop project and Git Host");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn multi_client_reconnect_preserves_history_and_approval_order() {
+    let directory = TestDirectory::new("multi-client-reconnect");
+    let config = approval_runtime_config(&directory);
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .expect("start multi-client Host");
+    let client_a = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("connect first client");
+    let first_client_id = client_a.client_id().to_owned();
+    let mut client_b = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("connect second client with the same launch URL");
+    assert_ne!(client_a.client_id(), client_b.client_id());
+
+    let project = client_a
+        .open_project(&directory.path.to_string_lossy())
+        .await
+        .expect("open multi-client project");
+    let session_id = client_a
+        .create_session(&project.project_id)
+        .await
+        .expect("create multi-client Session");
+    let mut follow_a = client_a.follow(&session_id).await.expect("follow with A");
+    let mut follow_b = client_b.follow(&session_id).await.expect("follow with B");
+    let mut journal_a = SessionJournal::new(&session_id);
+    let mut journal_b = SessionJournal::new(&session_id);
+    journal_a
+        .apply(&next_snapshot(&mut follow_a).await)
+        .expect("apply A baseline");
+    journal_b
+        .apply(&next_snapshot(&mut follow_b).await)
+        .expect("apply B baseline");
+
+    client_a
+        .rename_session(&session_id, "one")
+        .await
+        .expect("write first durable title");
+    let events_a = apply_through(&mut follow_a, &mut journal_a, "session/title").await;
+    let events_b = apply_through(&mut follow_b, &mut journal_b, "session/title").await;
+    assert_eq!(events_a.last().unwrap()["data"]["title"], "one");
+    assert_eq!(events_b.last().unwrap()["data"]["title"], "one");
+    assert_eq!(
+        events_a.last().unwrap()["seq"],
+        events_b.last().unwrap()["seq"]
+    );
+    let old_cursor = journal_a.cursor().unwrap();
+
+    drop(follow_a);
+    drop(client_a);
+    client_b
+        .rename_session(&session_id, "two")
+        .await
+        .expect("write first disconnected event");
+    apply_through(&mut follow_b, &mut journal_b, "session/title").await;
+    client_b
+        .rename_session(&session_id, "three")
+        .await
+        .expect("write second disconnected event");
+    apply_through(&mut follow_b, &mut journal_b, "session/title").await;
+
+    let mut reconnected_a = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("reconnect A with a fresh Peer");
+    assert_ne!(reconnected_a.client_id(), first_client_id);
+    let mut reconnected_follow = reconnected_a
+        .follow(&session_id)
+        .await
+        .expect("open A's replacement follow");
+    let snapshot = next_snapshot(&mut reconnected_follow).await;
+    let replacement = journal_a
+        .apply(&snapshot)
+        .expect("replace reconnect window")
+        .into_events();
+    let missed: Vec<_> = replacement
+        .into_iter()
+        .filter(|event| event["seq"].as_i64().unwrap() > old_cursor)
+        .collect();
+    assert_eq!(
+        missed
+            .iter()
+            .map(|event| event["seq"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![old_cursor + 1, old_cursor + 2]
+    );
+    assert_eq!(
+        missed
+            .iter()
+            .map(|event| event["data"]["title"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["two", "three"]
+    );
+    let page = client_b
+        .session_page(&session_id, old_cursor, None)
+        .await
+        .expect("read an explicit historical page");
+    assert_eq!(page["cursor"], old_cursor);
+    assert_eq!(
+        page["records"].as_array().unwrap().last().unwrap()["event"]["seq"],
+        old_cursor
+    );
+
+    client_b
+        .rename_session(&session_id, "after-reconnect")
+        .await
+        .expect("write handoff event");
+    let handoff_a = apply_through(&mut reconnected_follow, &mut journal_a, "session/title").await;
+    let handoff_b = apply_through(&mut follow_b, &mut journal_b, "session/title").await;
+    assert_eq!(
+        handoff_a.last().unwrap()["seq"],
+        handoff_b.last().unwrap()["seq"]
+    );
+
+    let request_id = "multi-client-approval-request";
+    reconnected_a
+        .prompt(&session_id, request_id, "METIS_TEST_APPROVAL_CANCEL")
+        .await
+        .expect("trigger deterministic approval");
+    let (approval_a, approval_b) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            next_approval(&mut reconnected_a),
+            next_approval(&mut client_b)
+        )
+    })
+    .await
+    .expect("both clients receive the same approval");
+    assert_eq!(approval_a.event_id, approval_b.event_id);
+    assert_eq!(approval_a.agent_id, session_id);
+    assert_eq!(approval_b.agent_id, session_id);
+    reconnected_a
+        .answer(&approval_a, ApprovalOutcome::AllowedOnce)
+        .await
+        .expect("first answer wins");
+    let cancelled = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let HostEvent::Cancelled { event_id } = client_b
+                .next_event()
+                .await
+                .expect("read approval cancellation")
+            {
+                break event_id;
+            }
+        }
+    })
+    .await
+    .expect("losing client receives cancellation");
+    assert_eq!(cancelled, approval_a.event_id);
+    client_b
+        .answer(&approval_b, ApprovalOutcome::Rejected)
+        .await
+        .expect("a late answer from the losing online client is a no-op");
+
+    let approval_events_a =
+        apply_through(&mut reconnected_follow, &mut journal_a, "approval/decided").await;
+    let approval_events_b = apply_through(&mut follow_b, &mut journal_b, "approval/decided").await;
+    let seqs_a: Vec<i64> = approval_events_a
+        .iter()
+        .map(|event| event["seq"].as_i64().unwrap())
+        .collect();
+    let seqs_b: Vec<i64> = approval_events_b
+        .iter()
+        .map(|event| event["seq"].as_i64().unwrap())
+        .collect();
+    assert_eq!(seqs_a, seqs_b);
+    for events in [&approval_events_a, &approval_events_b] {
+        assert_eq!(
+            logical_prompt_event_ids(events.iter(), request_id).len(),
+            1,
+            "events: {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "approval/asked")
+                .count(),
+            1
+        );
+        let decided: Vec<_> = events
+            .iter()
+            .filter(|event| event["type"] == "approval/decided")
+            .collect();
+        assert_eq!(decided.len(), 1, "events: {events:?}");
+        assert_eq!(decided[0]["data"]["outcome"], "allowed-once");
+    }
+    let settled = client_b
+        .wait(&session_id, Duration::from_secs(10))
+        .await
+        .expect("wait for cancelled turn to settle");
+    assert_eq!(settled["state"]["running"], false);
+    client_b
+        .rename_session(&session_id, "approval-settled")
+        .await
+        .expect("write a barrier after the late approval answer");
+    let mut final_follow = client_b
+        .follow(&session_id)
+        .await
+        .expect("read final approval history");
+    let final_snapshot = next_snapshot(&mut final_follow).await;
+    let mut final_journal = SessionJournal::new(&session_id);
+    let final_events = final_journal
+        .apply(&final_snapshot)
+        .expect("apply final approval history")
+        .into_events();
+    assert_eq!(
+        logical_prompt_event_ids(final_events.iter(), request_id).len(),
+        1
+    );
+    let final_decisions: Vec<_> = final_events
+        .iter()
+        .filter(|event| event["type"] == "approval/decided")
+        .collect();
+    assert_eq!(final_decisions.len(), 1, "final events: {final_events:?}");
+    assert_eq!(final_decisions[0]["data"]["outcome"], "allowed-once");
+
+    let mut paged_follow = client_b
+        .follow_with_limit(&session_id, 1)
+        .await
+        .expect("open a deliberately paginated follow");
+    let paged_snapshot = next_snapshot(&mut paged_follow).await;
+    assert_eq!(paged_snapshot["hasMore"], true);
+    let mut paged_journal = SessionJournal::new(&session_id);
+    let mut complete_history = paged_journal
+        .apply(&paged_snapshot)
+        .expect("apply limited history window")
+        .into_events();
+    let cursor = paged_journal.cursor().unwrap();
+    let mut page_count = 0;
+    while paged_journal.has_more() {
+        page_count += 1;
+        assert!(page_count < 100, "history pagination did not terminate");
+        let before = paged_journal.window_start().unwrap();
+        let page = client_b
+            .session_page(&session_id, cursor, Some(before))
+            .await
+            .expect("read older history at a fixed cutoff");
+        let older = paged_journal
+            .prepend_page(&page)
+            .expect("prepend contiguous older history");
+        complete_history.splice(0..0, older);
+    }
+    assert_eq!(
+        complete_history
+            .iter()
+            .map(|event| event["seq"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        (0..=cursor).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        logical_prompt_event_ids(complete_history.iter(), request_id).len(),
+        1
+    );
+    paged_follow.cancel();
+    final_follow.cancel();
+
+    reconnected_follow.cancel();
+    follow_b.cancel();
+    reconnected_a.close().await.expect("close reconnected A");
+    client_b.close().await.expect("close B");
+    runtime.shutdown().expect("stop multi-client Host");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn host_restart_recovers_history_and_settles_pending_approval() {
+    let directory = TestDirectory::new("host-restart-recovery");
+    let config = approval_runtime_config(&directory);
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .expect("start initial recovery Host");
+    let mut client = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("connect initial recovery client");
+    let project = client
+        .open_project(&directory.path.to_string_lossy())
+        .await
+        .expect("open persistent project");
+    let session_id = client
+        .create_session(&project.project_id)
+        .await
+        .expect("create persistent Session");
+    let mut follow = client
+        .follow(&session_id)
+        .await
+        .expect("follow persistent Session");
+    let mut journal = SessionJournal::new(&session_id);
+    journal
+        .apply(&next_snapshot(&mut follow).await)
+        .expect("apply initial recovery baseline");
+    let request_id = "restart-pending-approval-request";
+    client
+        .prompt(&session_id, request_id, "METIS_TEST_APPROVAL")
+        .await
+        .expect("trigger approval left pending across shutdown");
+    let approval = next_approval(&mut client).await;
+    apply_through(&mut follow, &mut journal, "approval/asked").await;
+    drop(follow);
+    drop(client);
+    runtime.shutdown().expect("gracefully stop initial Host");
+
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .expect("restart Host with the same DSH_HOME");
+    let client = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("connect client after Host restart");
+    let restored = client
+        .open_project(&directory.path.to_string_lossy())
+        .await
+        .expect("restore persistent project");
+    assert_eq!(restored.project_id, project.project_id);
+    assert!(restored.recent_session_ids.contains(&session_id));
+    let state = client
+        .state(&session_id)
+        .await
+        .expect("read cold Session state after restart");
+    assert_eq!(state["active"], false);
+    assert_eq!(state["running"], false);
+    assert_eq!(state["pendingInput"], serde_json::json!([]));
+
+    let mut follow = client
+        .follow(&session_id)
+        .await
+        .expect("follow restored Session");
+    let snapshot = next_snapshot(&mut follow).await;
+    assert_eq!(snapshot["assistantStream"]["revision"], 0);
+    assert!(snapshot["assistantStream"].get("activeAttempt").is_none());
+    let mut restored_journal = SessionJournal::new(&session_id);
+    let history = restored_journal
+        .apply(&snapshot)
+        .expect("apply restored history")
+        .into_events();
+    assert_eq!(
+        logical_prompt_event_ids(history.iter(), request_id).len(),
+        1,
+        "history: {history:?}"
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| event["type"] == "approval/asked")
+            .count(),
+        1
+    );
+    let decided: Vec<_> = history
+        .iter()
+        .filter(|event| event["type"] == "approval/decided")
+        .collect();
+    assert_eq!(decided.len(), 1, "history: {history:?}");
+    assert_eq!(decided[0]["data"]["outcome"], "unavailable");
+
+    let error = client
+        .answer(&approval, ApprovalOutcome::AllowedOnce)
+        .await
+        .expect_err("local generation guard must reject the old approval");
+    assert!(matches!(error, ClientError::Protocol(_)));
+    client
+        .prompt(&session_id, request_id, "METIS_TEST_APPROVAL")
+        .await
+        .expect("retry the persisted request id");
+    client
+        .rename_session(&session_id, "restart-retry-settled")
+        .await
+        .expect("write a barrier after the persisted request retry");
+    let state = client
+        .state(&session_id)
+        .await
+        .expect("read settled retry state");
+    assert_eq!(state["running"], false);
+    assert_eq!(state["pendingInput"], serde_json::json!([]));
+    let mut retry_follow = client
+        .follow(&session_id)
+        .await
+        .expect("read final request-retry history");
+    let retry_snapshot = next_snapshot(&mut retry_follow).await;
+    let mut retry_journal = SessionJournal::new(&session_id);
+    let retry_history = retry_journal
+        .apply(&retry_snapshot)
+        .expect("apply request-retry history")
+        .into_events();
+    assert_eq!(
+        logical_prompt_event_ids(retry_history.iter(), request_id).len(),
+        1
+    );
+    assert_eq!(
+        retry_history
+            .iter()
+            .filter(|event| event["type"] == "approval/asked")
+            .count(),
+        1
+    );
+    let retry_decisions: Vec<_> = retry_history
+        .iter()
+        .filter(|event| event["type"] == "approval/decided")
+        .collect();
+    assert_eq!(retry_decisions.len(), 1);
+    assert_eq!(retry_decisions[0]["data"]["outcome"], "unavailable");
+    retry_follow.cancel();
+
+    follow.cancel();
+    client.close().await.expect("close recovery client");
+    runtime.shutdown().expect("stop restarted Host");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn host_restart_drops_live_turn_output_and_job() {
+    let directory = TestDirectory::new("host-restart-live-work");
+    let config = restart_runtime_config(&directory);
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .expect("start controlled live-work Host");
+    let client = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("connect controlled live-work client");
+    let project = client
+        .open_project(&directory.path.to_string_lossy())
+        .await
+        .expect("open live-work project");
+    let session_id = client
+        .create_session(&project.project_id)
+        .await
+        .expect("create live-work Session");
+    client
+        .prompt(
+            &session_id,
+            "controlled-live-work-request",
+            "METIS_RESTART_LIVE",
+        )
+        .await
+        .expect("start controlled live work");
+    let pid_path = directory.path.join("metis-test-job.pid");
+    wait_until(
+        || {
+            fs::read_to_string(&pid_path)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+                .is_some()
+        },
+        "complete controlled bash PID file",
+    );
+    let pid = read_pid(&pid_path);
+    wait_until(
+        || {
+            let output = runtime.output_snapshot();
+            output.contains("[metis-test] bash process started")
+                && output.contains("[metis-test] assistant stream held open")
+        },
+        "controlled bash and assistant stream",
+    );
+
+    let mut live_follow = client
+        .follow(&session_id)
+        .await
+        .expect("follow active output");
+    let live_snapshot = next_snapshot(&mut live_follow).await;
+    let mut journal = SessionJournal::new(&session_id);
+    let events = journal
+        .apply(&live_snapshot)
+        .expect("apply active live-work snapshot")
+        .into_events();
+    let registered = events
+        .iter()
+        .find(|event| event["type"] == "job/registered")
+        .expect("job registration event");
+    let job_id = registered["data"]["jobId"].as_str().unwrap().to_owned();
+    assert_eq!(registered["data"]["owner"], session_id);
+    let active = &live_snapshot["assistantStream"]["activeAttempt"];
+    assert!(active.is_object(), "snapshot: {live_snapshot}");
+    assert!(active["nextIndex"].as_u64().unwrap() > 0);
+    assert!(active.to_string().contains("METIS_LIVE_CHUNK"));
+
+    let running = client.state(&session_id).await.expect("read running state");
+    assert_eq!(running["running"], true);
+    drop(live_follow);
+    drop(client);
+    runtime.shutdown().expect("stop Host with live work");
+    wait_until(
+        || processes_have_exited(&[pid]),
+        "controlled bash process cleanup",
+    );
+
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .expect("restart controlled live-work Host");
+    let client = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("connect after live-work restart");
+    let state = client
+        .state(&session_id)
+        .await
+        .expect("read restored live-work state");
+    assert_eq!(state["active"], false);
+    assert_eq!(state["running"], false);
+    let mut follow = client
+        .follow(&session_id)
+        .await
+        .expect("follow restored live work");
+    let snapshot = next_snapshot(&mut follow).await;
+    assert_eq!(snapshot["assistantStream"]["revision"], 0);
+    assert!(snapshot["assistantStream"].get("activeAttempt").is_none());
+    let mut restored_journal = SessionJournal::new(&session_id);
+    let history = restored_journal
+        .apply(&snapshot)
+        .expect("apply live-work history")
+        .into_events();
+    let registrations: Vec<_> = history
+        .iter()
+        .filter(|event| event["type"] == "job/registered")
+        .collect();
+    assert_eq!(registrations.len(), 1, "history: {history:?}");
+    assert_eq!(registrations[0]["data"]["jobId"], job_id);
+    assert!(
+        history
+            .iter()
+            .filter(|event| matches!(
+                event["type"].as_str(),
+                Some("assistant/message" | "assistant/attempt")
+            ))
+            .any(|event| event.to_string().contains("METIS_LIVE_CHUNK")),
+        "settled history must retain delivered output: {history:?}"
+    );
+    wait_until(
+        || {
+            runtime
+                .output_snapshot()
+                .contains(&format!("[metis-test] jobs {session_id} []"))
+        },
+        "empty job registry after Session resume",
+    );
+    let state = client
+        .state(&session_id)
+        .await
+        .expect("read quiescent resumed state");
+    assert_eq!(state["running"], false);
+    let mut settled_follow = client
+        .follow(&session_id)
+        .await
+        .expect("read settled assistant baseline");
+    let settled_snapshot = next_snapshot(&mut settled_follow).await;
+    assert_eq!(settled_snapshot["assistantStream"]["revision"], 0);
+    assert!(
+        settled_snapshot["assistantStream"]
+            .get("activeAttempt")
+            .is_none()
+    );
+    settled_follow.cancel();
+
+    follow.cancel();
+    client
+        .close()
+        .await
+        .expect("close restored live-work client");
+    runtime.shutdown().expect("stop restored live-work Host");
 }
 
 #[tokio::test]
