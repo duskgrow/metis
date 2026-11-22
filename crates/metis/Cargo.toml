@@ -45,3 +45,6 @@ nix.workspace = true
 [dev-dependencies]
 insta.workspace = true
 assert_cmd.workspace = true
+# test-support also resolves GPUI Fast, whose exact wgpu pin selects 30.0.1
+# in Cargo.lock for both the production GPUI backend and these headless tests.
+gpui-kit = { workspace = true, features = ["test-support"] }
