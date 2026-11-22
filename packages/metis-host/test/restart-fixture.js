@@ -78,6 +78,12 @@ function startBashJob(ctx, agent) {
     command: `printf 'METIS_JOB_STARTED\\n'; pwd > ${cwdPath}; printf '%s' "$$" > ${pidPath}; exec sleep 30`,
     workdir: agent.session.header.cwd,
     onExpiry: "none",
+    // The test observes the real process from the host. A bwrap private /tmp
+    // would hide these files even though the process started successfully.
+    sandboxPolicy: {
+      mode: "danger-full-access",
+      workspaceRoot: agent.session.header.cwd,
+    },
   });
   const id = ctx.jobs.start({
     kind: "bash",
