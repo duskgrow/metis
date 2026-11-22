@@ -75,6 +75,42 @@ test("production pruning follows manifests and removes unreachable virtual packa
   await assert.rejects(lstat(unwanted), { code: "ENOENT" });
 });
 
+test("production pruning accepts a linked deploy directory", async (t) => {
+  const sandbox = await mkdtemp(join(tmpdir(), "metis-prune-link-test-"));
+  t.after(() => rm(sandbox, { recursive: true, force: true }));
+  const directory = join(sandbox, "deploy");
+  const modules = join(directory, "node_modules");
+  const virtual = join(modules, ".pnpm");
+  const wanted = await packageAt(virtual, "a", "a", {});
+  await writeFile(
+    join(directory, "package.json"),
+    JSON.stringify({ name: "root", dependencies: { a: "1.0.0" } }),
+  );
+  await link(modules, "a", wanted);
+  await link(sandbox, "alias", directory);
+
+  assert.deepEqual(await pruneProductionPackages(join(sandbox, "alias")), { kept: 1, removed: 0 });
+});
+
+test("production pruning does not prune an externally linked virtual store", async (t) => {
+  const sandbox = await mkdtemp(join(tmpdir(), "metis-prune-boundary-test-"));
+  t.after(() => rm(sandbox, { recursive: true, force: true }));
+  const directory = join(sandbox, "deploy");
+  const modules = join(directory, "node_modules");
+  const external = join(sandbox, "external");
+  const wanted = await packageAt(external, "a", "a", {});
+  const unrelated = await packageAt(external, "unrelated", "unrelated", {});
+  await link(modules, ".pnpm", external);
+  await writeFile(
+    join(directory, "package.json"),
+    JSON.stringify({ name: "root", dependencies: { a: "1.0.0" } }),
+  );
+  await link(modules, "a", wanted);
+
+  await assert.rejects(pruneProductionPackages(directory), /no reachable packages/u);
+  assert.ok((await lstat(join(unrelated, "package.json"))).isFile());
+});
+
 test("production pruning rejects a missing required dependency", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "metis-prune-missing-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

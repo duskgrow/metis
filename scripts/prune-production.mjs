@@ -75,7 +75,10 @@ async function removeBrokenLinks(directory) {
  * graph even though pnpm resolves a patch after constructing its lockfile.
  */
 export async function pruneProductionPackages(deployDirectory) {
-  const modulesDirectory = join(deployDirectory, "node_modules");
+  const rootDirectory = await realpath(deployDirectory);
+  const modulesDirectory = join(rootDirectory, "node_modules");
+  // Keep .pnpm lexical to the canonical deploy root: resolving a linked store
+  // would widen the recursive deletion boundary.
   const virtualDirectory = join(modulesDirectory, ".pnpm");
   const reachable = new Set();
 
@@ -106,7 +109,7 @@ export async function pruneProductionPackages(deployDirectory) {
     }
   }
 
-  const rootManifest = await readManifest(deployDirectory);
+  const rootManifest = await readManifest(rootDirectory);
   for (const name of dependencyNames(rootManifest)) {
     await visit(
       join(modulesDirectory, name),
