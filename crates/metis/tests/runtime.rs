@@ -1299,6 +1299,21 @@ async fn project_and_git_workflows_use_real_host() {
         .await
         .expect("read project file");
     assert_eq!(file, "before\n");
+    client
+        .write_project_file(&opened.project_id, "tracked.txt", "written by Host\n")
+        .await
+        .expect("write existing project file");
+    assert_eq!(
+        client
+            .read_project_file(&opened.project_id, "tracked.txt")
+            .await
+            .expect("read Host-written project file"),
+        "written by Host\n"
+    );
+    client
+        .write_project_file(&opened.project_id, "tracked.txt", "before\n")
+        .await
+        .expect("restore project fixture through Host");
     let session_id = client
         .create_session(&opened.project_id)
         .await
@@ -1319,7 +1334,19 @@ async fn project_and_git_workflows_use_real_host() {
             matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
             "unexpected path escape error: {error}"
         );
+        let error = client
+            .write_project_file(&opened.project_id, path, "changed\n")
+            .await
+            .expect_err("project write escapes must be rejected");
+        assert!(
+            matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
+            "unexpected write escape error: {error}"
+        );
     }
+    assert_eq!(
+        fs::read_to_string(&outside).expect("read outside fixture"),
+        "outside\n"
+    );
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&outside, project.join("outside-link.txt"))
@@ -1331,6 +1358,18 @@ async fn project_and_git_workflows_use_real_host() {
         assert!(
             matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
             "unexpected symlink escape error: {error}"
+        );
+        let error = client
+            .write_project_file(&opened.project_id, "outside-link.txt", "changed\n")
+            .await
+            .expect_err("external symlink writes must be rejected");
+        assert!(
+            matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
+            "unexpected symlink write error: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside).expect("read outside fixture"),
+            "outside\n"
         );
     }
 
@@ -1437,6 +1476,30 @@ async fn project_and_git_workflows_use_real_host() {
     assert!(
         matches!(error, ClientError::Remote { ref code, .. } if code == "project/read-failed"),
         "unexpected oversized-file error: {error}"
+    );
+    let error = client
+        .write_project_file(&opened.project_id, "tracked.txt", &"x".repeat(513 * 1024))
+        .await
+        .expect_err("oversized writes must be rejected");
+    assert!(
+        matches!(error, ClientError::Remote { ref code, .. } if code == "project/write-failed"),
+        "unexpected oversized-write error: {error}"
+    );
+    let error = client
+        .write_project_file(&opened.project_id, "missing.txt", "missing\n")
+        .await
+        .expect_err("writes must not silently create missing files");
+    assert!(
+        matches!(error, ClientError::Remote { ref code, .. } if code == "project/write-failed"),
+        "unexpected missing-file write error: {error}"
+    );
+    let error = client
+        .write_project_file(&opened.project_id, "nested", "not a file\n")
+        .await
+        .expect_err("writes must reject non-regular files");
+    assert!(
+        matches!(error, ClientError::Remote { ref code, .. } if code == "project/write-failed"),
+        "unexpected non-file write error: {error}"
     );
 
     #[cfg(unix)]

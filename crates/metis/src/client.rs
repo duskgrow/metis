@@ -385,6 +385,21 @@ impl DshClient {
         required_text(&value, "content", "project/read response omitted content")
     }
 
+    /// Replace one existing UTF-8 file in a Host project.
+    pub async fn write_project_file(
+        &self,
+        project_id: &str,
+        path: &str,
+        content: &str,
+    ) -> ClientResult<()> {
+        self.rpc(
+            "project/write",
+            json!({ "request": { "projectId": project_id, "path": path, "content": content } }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Return the project's UTF-8 porcelain-v1, NUL-delimited Git status.
     pub async fn git_status(&self, project_id: &str) -> ClientResult<String> {
         let value = self
