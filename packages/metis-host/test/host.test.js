@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -114,7 +114,7 @@ test("the private host boots public dsh capabilities without a frontend", {
     path: host.home,
   });
   assert.equal(opened.result.ok, true, JSON.stringify(opened.result));
-  assert.equal(opened.result.value.path, host.home);
+  assert.equal(opened.result.value.path, await realpath(host.home));
   assert.equal(typeof opened.result.value.projectId, "string");
 
   const read = await postRpc(webUrl, cookie, "project/read", {
