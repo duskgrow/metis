@@ -1,3 +1,6 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 const provider = "metis-controlled";
 const model = "controlled";
 const restartMarker = "METIS_RESTART_LIVE";
@@ -108,6 +111,10 @@ function startBashJob(ctx, agent) {
 export const inject = ["llm", "shell", "jobs"];
 
 export function apply(ctx) {
+  writeFileSync(
+    join(process.env.DSH_HOME, "metis-test-host.pid"),
+    String(process.pid),
+  );
   ctx.llm.registerAdapter([provider], new ControlledAdapter());
   ctx.on("agent/created", ({ agent }) => {
     const jobs = ctx.jobs.list(agent.id).map((job) => job.id);

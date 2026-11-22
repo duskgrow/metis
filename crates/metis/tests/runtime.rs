@@ -352,9 +352,17 @@ fn forced_parent_death_cleans_cooperative_tree_and_allows_restart() {
         "fixture workbench startup",
     );
     let watchdog = read_pid(&directory.path.join("ready"));
+    let mut cleanup = TestTreeGuard::containing(watchdog, &[watchdog]);
     let dsh = read_pid(&directory.path.join("dsh-home/dsh.pid"));
+    cleanup.pids.push(dsh);
     let agent = read_pid(&directory.path.join("dsh-home/agent.pid"));
-    let _cleanup = TestTreeGuard::containing(watchdog, &[watchdog, dsh, agent]);
+    cleanup.pids.push(agent);
+    for pid in [watchdog, dsh, agent] {
+        assert!(
+            !processes_have_exited(&[pid]),
+            "process {pid} must be alive before the forced workbench shutdown"
+        );
+    }
 
     fixture.0.kill().expect("force-kill the fixture workbench");
     fixture.0.wait().expect("reap the fixture workbench");
@@ -368,6 +376,202 @@ fn forced_parent_death_cleans_cooperative_tree_and_allows_restart() {
         .expect("a fresh runtime starts after the previous workbench was killed");
     assert_ne!(restarted.id(), watchdog, "a new watchdog must be created");
     restarted.shutdown().expect("stop the restarted runtime");
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_parent_death_cleans_real_host_agent_and_job() {
+    if env::var_os(CRASH_FIXTURE_ENV).is_some() {
+        run_real_crash_fixture_parent();
+        return;
+    }
+
+    let directory = TestDirectory::new("forced-parent-death-real-host");
+    let config = restart_runtime_config(&directory);
+    let mut fixture = ProcessGuard(
+        Command::new(env::current_exe().expect("current integration-test executable"))
+            .args([
+                "forced_parent_death_cleans_real_host_agent_and_job",
+                "--exact",
+            ])
+            .env(CRASH_FIXTURE_ENV, "1")
+            .env(CRASH_HOME_ENV, &directory.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn the real-Host fixture workbench process"),
+    );
+
+    wait_until(
+        || directory.path.join("ready").is_file(),
+        "real-Host fixture workbench startup and live Agent work",
+    );
+    let watchdog = read_pid(&directory.path.join("ready"));
+    let mut cleanup = TestTreeGuard::containing(watchdog, &[watchdog]);
+    let host = read_pid(&config.home.join("metis-test-host.pid"));
+    cleanup.pids.push(host);
+    let job = read_pid(&directory.path.join("metis-test-job.pid"));
+    cleanup.pids.push(job);
+    for pid in [watchdog, host, job] {
+        assert!(
+            !processes_have_exited(&[pid]),
+            "process {pid} must be alive before the forced workbench shutdown"
+        );
+    }
+
+    fixture
+        .0
+        .kill()
+        .expect("force-kill the real-Host workbench");
+    fixture.0.wait().expect("reap the real-Host workbench");
+    wait_until(
+        || processes_have_exited(&[watchdog, host, job]),
+        "watchdog, real Host, and live Agent job cleanup after forced parent death",
+    );
+
+    let mut restarted = DshSupervisor::system()
+        .start(&config)
+        .expect("a fresh real Host starts after the previous workbench was killed");
+    assert_ne!(restarted.id(), watchdog, "a new watchdog must be created");
+    restarted.shutdown().expect("stop the restarted real Host");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forced_parent_death_cleans_unresponsive_host_and_detached_job() {
+    if env::var_os(CRASH_FIXTURE_ENV).is_some() {
+        run_real_crash_fixture_parent();
+        return;
+    }
+
+    let directory = TestDirectory::new("forced-parent-death-unresponsive-host");
+    let config = unresponsive_runtime_config(&directory);
+    let mut fixture = ProcessGuard(
+        Command::new(env::current_exe().expect("current integration-test executable"))
+            .args([
+                "forced_parent_death_cleans_unresponsive_host_and_detached_job",
+                "--exact",
+            ])
+            .env(CRASH_FIXTURE_ENV, "1")
+            .env(CRASH_HOME_ENV, &directory.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn the unresponsive-Host fixture workbench process"),
+    );
+
+    wait_until(
+        || directory.path.join("ready").is_file(),
+        "unresponsive-Host fixture workbench startup and live Agent work",
+    );
+    let watchdog = read_pid(&directory.path.join("ready"));
+    let mut cleanup = TestTreeGuard::containing(watchdog, &[watchdog]);
+    let host = read_pid(&config.home.join("metis-test-host.pid"));
+    cleanup.pids.push(host);
+    let job = read_pid(&directory.path.join("metis-test-job.pid"));
+    cleanup.pids.push(job);
+    for pid in [watchdog, host, job] {
+        assert!(
+            !processes_have_exited(&[pid]),
+            "process {pid} must be alive before the forced workbench shutdown"
+        );
+    }
+    let scope = detached_scope_unit(watchdog, host, job);
+
+    fixture
+        .0
+        .kill()
+        .expect("force-kill the unresponsive-Host workbench");
+    fixture
+        .0
+        .wait()
+        .expect("reap the unresponsive-Host workbench");
+    wait_until(
+        || processes_have_exited(&[watchdog, host, job]),
+        "watchdog and detached Agent job cleanup after Host shutdown stops responding",
+    );
+    assert_scope_absent(&scope);
+
+    let mut restarted = DshSupervisor::system()
+        .start(&restart_runtime_config(&directory))
+        .expect("a fresh real Host starts after unresponsive Host cleanup");
+    assert_ne!(restarted.id(), watchdog, "a new watchdog must be created");
+    restarted.shutdown().expect("stop the restarted real Host");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn unresponsive_host_shutdown_cleans_detached_job() {
+    let directory = TestDirectory::new("unresponsive-host-shutdown");
+    let mut config = unresponsive_runtime_config(&directory);
+    config.shutdown_timeout = Duration::from_millis(100);
+    let mut runtime = DshSupervisor::system()
+        .start(&config)
+        .expect("start unresponsive Host");
+    let watchdog = runtime.id();
+    let mut cleanup = TestTreeGuard::containing(watchdog, &[watchdog]);
+    let client = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+        .await
+        .expect("connect unresponsive-Host client");
+    let session_id = create_session_at(&client, &directory.path).await;
+    client
+        .prompt(
+            &session_id,
+            "unresponsive-host-shutdown-request",
+            "METIS_RESTART_LIVE",
+        )
+        .await
+        .expect("start live work before unresponsive Host shutdown");
+    let pid_path = directory.path.join("metis-test-job.pid");
+    wait_until(
+        || {
+            fs::read_to_string(&pid_path)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+                .is_some()
+        },
+        "unresponsive-Host bash PID file",
+    );
+    wait_until(
+        || {
+            runtime
+                .output_snapshot()
+                .contains("[metis-test] assistant stream held open")
+        },
+        "unresponsive-Host assistant stream",
+    );
+    let host = read_pid(&config.home.join("metis-test-host.pid"));
+    cleanup.pids.push(host);
+    let job = read_pid(&pid_path);
+    cleanup.pids.push(job);
+    for pid in [watchdog, host, job] {
+        assert!(
+            !processes_have_exited(&[pid]),
+            "process {pid} must be alive before unresponsive Host shutdown"
+        );
+    }
+    let scope = detached_scope_unit(watchdog, host, job);
+
+    let error = runtime
+        .shutdown()
+        .expect_err("outer shutdown deadline must expire while the Host is unresponsive");
+    assert!(
+        matches!(error, Error::RuntimeShutdownTimeout(_)),
+        "unexpected shutdown error: {error:?}"
+    );
+    wait_until(
+        || processes_have_exited(&[watchdog, host, job]),
+        "detached Agent job cleanup after outer shutdown escalation",
+    );
+    assert_scope_absent(&scope);
+
+    let mut restarted = DshSupervisor::system()
+        .start(&restart_runtime_config(&directory))
+        .expect("a fresh real Host starts after outer shutdown escalation");
+    assert_ne!(restarted.id(), watchdog, "a new watchdog must be created");
+    restarted.shutdown().expect("stop the restarted real Host");
 }
 
 const FAKE_TREE_SCRIPT: &str = r#"
@@ -417,10 +621,72 @@ fn run_crash_fixture_parent() {
             shutdown_timeout: Duration::from_secs(15),
         })
         .expect("fixture workbench starts its runtime");
-    fs::write(directory.join("ready"), runtime.id().to_string()).expect("publish watchdog PID");
+    publish_watchdog_pid(&directory, runtime.id());
 
     // Keep Drop from running: the outer test terminates this process directly.
     // Keeping the runtime binding alive is intentional.
+    loop {
+        thread::park();
+    }
+}
+
+#[cfg(unix)]
+fn run_real_crash_fixture_parent() {
+    let directory = PathBuf::from(env::var_os(CRASH_HOME_ENV).expect("crash fixture home"));
+    let config = DshRuntimeConfig {
+        metis_executable: PathBuf::from(env!("CARGO_BIN_EXE_metis")),
+        node_executable: PathBuf::from("node"),
+        host_entrypoint: real_dsh_entrypoint(),
+        home: directory.join("dsh-home"),
+        startup_timeout: Duration::from_secs(30),
+        shutdown_timeout: Duration::from_secs(15),
+    };
+    let tokio = tokio::runtime::Runtime::new().expect("create crash fixture async runtime");
+    let (runtime, client) = tokio.block_on(async {
+        let runtime = DshSupervisor::system()
+            .start(&config)
+            .expect("start real Host in the fixture workbench");
+        let client = DshClient::connect(runtime.auth_url(), DshClientConfig::default())
+            .await
+            .expect("connect real-Host crash fixture client");
+        let session_id = create_session_at(&client, &directory).await;
+        client
+            .prompt(
+                &session_id,
+                "controlled-parent-death-request",
+                "METIS_RESTART_LIVE",
+            )
+            .await
+            .expect("start real Agent work before the workbench crash");
+        let pid_path = directory.join("metis-test-job.pid");
+        wait_until(
+            || {
+                fs::read_to_string(&pid_path)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+                    .is_some()
+            },
+            "real Agent bash PID file",
+        );
+        wait_until(
+            || {
+                runtime
+                    .output_snapshot()
+                    .contains("[metis-test] assistant stream held open")
+            },
+            "real Agent assistant stream",
+        );
+        let running = client
+            .state(&session_id)
+            .await
+            .expect("read real Agent state before the workbench crash");
+        assert_eq!(running["running"], true);
+        (runtime, client)
+    });
+    publish_watchdog_pid(&directory, runtime.id());
+
+    // The outer test kills this process directly, so none of these owners run Drop.
+    let _keep_alive = (tokio, runtime, client);
     loop {
         thread::park();
     }
@@ -447,6 +713,11 @@ fn approval_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
 
 fn restart_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
     fixture_runtime_config(directory, "restart-fixture.js")
+}
+
+#[cfg(target_os = "linux")]
+fn unresponsive_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
+    fixture_runtime_config(directory, "unresponsive-host-fixture.js")
 }
 
 fn fixture_runtime_config(directory: &TestDirectory, fixture: &str) -> DshRuntimeConfig {
@@ -477,6 +748,70 @@ fn read_pid(path: &Path) -> u32 {
         .trim()
         .parse()
         .expect("PID file contains an integer")
+}
+
+fn publish_watchdog_pid(directory: &Path, pid: u32) {
+    let pending = directory.join("ready.pending");
+    fs::write(&pending, pid.to_string()).expect("write pending watchdog PID");
+    fs::rename(&pending, directory.join("ready")).expect("atomically publish watchdog PID");
+}
+
+#[cfg(target_os = "linux")]
+fn detached_scope_unit(watchdog: u32, host: u32, job: u32) -> String {
+    let stat =
+        fs::read_to_string(format!("/proc/{job}/stat")).expect("read Agent job process stat");
+    let end = stat.rfind(')').expect("process stat contains its command");
+    let process_group = stat[end + 2..]
+        .split_whitespace()
+        .nth(2)
+        .and_then(|value| value.parse::<u32>().ok())
+        .expect("process stat contains a process group");
+    assert_ne!(
+        process_group, watchdog,
+        "Agent job must be detached from the watchdog process group"
+    );
+
+    let cgroup = fs::read_to_string(format!("/proc/{job}/cgroup"))
+        .expect("read Agent job cgroup membership");
+    let unit = cgroup
+        .lines()
+        .find_map(|line| line.split_once("::/").map(|(_, path)| path))
+        .and_then(|path| path.rsplit('/').next())
+        .filter(|unit| unit.strip_suffix(".scope").is_some())
+        .expect("Agent job must belong to a systemd scope");
+    let prefix = format!("dsh-subprocess-{host}-");
+    let suffix = unit
+        .strip_prefix(&prefix)
+        .expect("Agent job scope must be owned by the current Host");
+    assert!(
+        suffix.strip_suffix(".scope").is_some_and(|name| {
+            name.len() == 12 && name.chars().all(|character| character.is_ascii_hexdigit())
+        }),
+        "unexpected Agent job scope: {unit}"
+    );
+    unit.to_owned()
+}
+
+#[cfg(target_os = "linux")]
+fn assert_scope_absent(unit: &str) {
+    let output = Command::new("systemctl")
+        .args(["--user", "show", unit])
+        .output()
+        .expect("verify scope removal with systemctl");
+    let details = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        details.contains("LoadState=not-found")
+            || details.contains("NoSuchUnit")
+            || (!output.status.success()
+                && (details.contains("could not be found")
+                    || details.contains("not found")
+                    || details.contains("not loaded"))),
+        "scope {unit} still exists or could not be checked: {details}"
+    );
 }
 
 fn processes_have_exited(pids: &[u32]) -> bool {

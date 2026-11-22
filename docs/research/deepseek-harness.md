@@ -15,7 +15,7 @@ Node.js 补丁版本会直接影响可用性。同一 dsh 在 Node.js 24.18.0 �
 
 2026-11-18 在当前 Linux x64 开发环境中，Rust 监督层已验证真实 dsh 的启动与关闭、启动超时清理、父进程被强制终止后的普通进程组清理和重新启动。探测确认 dsh web 安装了 `SIGTERM` 处理器并以成功状态退出；测试替身同时覆盖了 dsh 正常执行清理时，其脱离原进程组的受管子进程随之停止的路径。
 
-dsh 的原生 Linux 子进程可以脱离原进程组并交由用户级 systemd scope 管理。当前监督层无法回收 dsh 卡死或被提前强杀后遗留的独立 scope，因此[里程碑 0 的强制终止验证](../product-scope.md)仍未完成；需要真实模型任务验证，并为这个失败路径补充外部 scope 清理。多客户端与重连、干净 NixOS 安装以及无显示发行包也仍未验证。
+dsh 的原生 Linux 子进程可以脱离原进程组并交由用户级 systemd scope 管理，因此仅清理进程组不足以覆盖 Host 卡死或被提前强杀的路径；监督层必须同时回收这些 scope。多客户端与重连的后续验证见下文，干净 NixOS 安装以及无显示发行包仍未验证。
 
 2026-11-19 在同一环境使用公开发布包验证了私有 Node.js Host：公开 `runProfile` 装配 `dsh-base`、webserver、client-connection 和 Metis 插件，无需 Electron、private Desktop Host 或上游源码投影。Host 不加载 `dsh-web-app` 时根路径返回 404，但公开 BrowserAuth、HTTP RPC、Cordis 事件、智能体创建与销毁、应用级关闭均通过；固定 Node.js 直接启动原 Desktop Host 的 ready、shutdown 和父进程断开路径也已通过。验证尚未覆盖真实模型轮次、跨客户端流式事件与重连；当前完整 CLI 包的依赖闭包仍包含未装载的 Web 组件，发行裁剪不在本次结论内。
 
@@ -36,6 +36,8 @@ dsh 的原生 Linux 子进程可以脱离原进程组并交由用户级 systemd 
 | assistant 输出                  | 已交付内容随持久结算保留，旧 activeAttempt 和实时帧不 replay                                |
 | 后台 bash 与 job registry       | 进程停止，恢复后的 registry 为空；job/registered 保留，job/settled 仍按上游实际结算情况存在 |
 | 待处理审批                      | 关闭时写入 decided(unavailable)，重启后不重发；新 Rust 客户端在本地拒绝旧 clientId          |
+
+2026-11-22 真实私有 Host 的父进程强杀测试已覆盖活动 Agent 轮次与后台 bash：受控公开模型适配器让 assistant stream 保持打开，公开 jobs 接口启动真实进程。监督层冻结并核验 Host 后，通过 `/proc` 快照记录其 `dsh-subprocess`、`dsh-subprocess-probe` 和 `dsh-terminal` scope，再由 systemctl 强杀这些 unit 的当前成员并释放对应 unit。watchdog 与外层 shutdown deadline 都能执行该兜底，覆盖 Host 无响应和 watchdog 被强杀的路径。测试通过 `/proc` 确认后台进程确实位于独立 scope，清理后对应 unit 不再加载，watchdog、Host 与后台进程均退出，同一 DSH_HOME 随后能启动新的运行时。
 
 ## 接入方式
 
