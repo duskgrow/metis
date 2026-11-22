@@ -59,6 +59,13 @@ class ControlledAdapter {
   }
 }
 
+function reportJobError(agent, error) {
+  writeFileSync(
+    join(agent.session.header.cwd, "metis-test-job.error"),
+    String(error),
+  );
+}
+
 function startBashJob(ctx, agent) {
   let proc;
   const spec = ctx.shell.resolve({
@@ -89,6 +96,7 @@ function startBashJob(ctx, agent) {
             ? { status: "killed", detail: proc.signal ?? "killed" }
             : { status: "completed", detail: `exit code: ${proc.exitCode ?? 0}` };
         } catch (error) {
+          if (!abort.signal.aborted) reportJobError(agent, error);
           return {
             status: abort.signal.aborted ? "killed" : "failed",
             detail: String(error),
@@ -134,6 +142,7 @@ export function apply(ctx) {
       Promise.resolve()
         .then(() => startBashJob(ctx, agent))
         .catch((error) => {
+          reportJobError(agent, error);
           console.log(`[metis-test] job failed: ${String(error)}`);
         });
     });

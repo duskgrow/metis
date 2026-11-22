@@ -524,16 +524,7 @@ async fn unresponsive_host_shutdown_cleans_detached_job() {
         )
         .await
         .expect("start live work before unresponsive Host shutdown");
-    let pid_path = directory.path.join("metis-test-job.pid");
-    wait_until(
-        || {
-            fs::read_to_string(&pid_path)
-                .ok()
-                .and_then(|pid| pid.trim().parse::<u32>().ok())
-                .is_some()
-        },
-        "unresponsive-Host bash PID file",
-    );
+    let job = wait_for_job_pid(&directory.path);
     wait_until(
         || {
             runtime
@@ -544,7 +535,6 @@ async fn unresponsive_host_shutdown_cleans_detached_job() {
     );
     let host = read_pid(&config.home.join("metis-test-host.pid"));
     cleanup.pids.push(host);
-    let job = read_pid(&pid_path);
     cleanup.pids.push(job);
     for pid in [watchdog, host, job] {
         assert!(
@@ -658,16 +648,7 @@ fn run_real_crash_fixture_parent() {
             )
             .await
             .expect("start real Agent work before the workbench crash");
-        let pid_path = directory.join("metis-test-job.pid");
-        wait_until(
-            || {
-                fs::read_to_string(&pid_path)
-                    .ok()
-                    .and_then(|pid| pid.trim().parse::<u32>().ok())
-                    .is_some()
-            },
-            "real Agent bash PID file",
-        );
+        let _ = wait_for_job_pid(&directory);
         wait_until(
             || {
                 runtime
@@ -748,6 +729,25 @@ fn read_pid(path: &Path) -> u32 {
         .trim()
         .parse()
         .expect("PID file contains an integer")
+}
+
+#[cfg(unix)]
+fn wait_for_job_pid(directory: &Path) -> u32 {
+    let pid_path = directory.join("metis-test-job.pid");
+    let error_path = directory.join("metis-test-job.error");
+    wait_until(
+        || {
+            if let Ok(error) = fs::read_to_string(&error_path) {
+                panic!("controlled bash job failed: {error}");
+            }
+            fs::read_to_string(&pid_path)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+                .is_some()
+        },
+        "controlled bash PID file",
+    );
+    read_pid(&pid_path)
 }
 
 fn publish_watchdog_pid(directory: &Path, pid: u32) {
@@ -912,6 +912,9 @@ impl TestDirectory {
             "metis-runtime-{name}-{}-{sequence}",
             std::process::id()
         ));
+        if path.exists() {
+            fs::remove_dir_all(&path).expect("remove stale test directory");
+        }
         fs::create_dir_all(&path).expect("create isolated test directory");
         Self { path }
     }
@@ -1825,17 +1828,7 @@ async fn host_restart_drops_live_turn_output_and_job() {
         )
         .await
         .expect("start controlled live work");
-    let pid_path = directory.path.join("metis-test-job.pid");
-    wait_until(
-        || {
-            fs::read_to_string(&pid_path)
-                .ok()
-                .and_then(|pid| pid.trim().parse::<u32>().ok())
-                .is_some()
-        },
-        "complete controlled bash PID file",
-    );
-    let pid = read_pid(&pid_path);
+    let pid = wait_for_job_pid(&directory.path);
     wait_until(
         || {
             let output = runtime.output_snapshot();
