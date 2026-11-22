@@ -98,6 +98,8 @@ async function main(): Promise<void> {
   );
 
   const plugin = fileURLToPath(new URL("./index.js", import.meta.url));
+  // Built-in wiring is source-owned and regenerated on every boot. User
+  // overrides belong in $DSH_HOME/cordis.patch.yml, which dsh applies later.
   await writeFile(
     join(profileDir, "cordis.patch.yml"),
     `${
@@ -114,6 +116,23 @@ async function main(): Promise<void> {
                 id: "connection",
                 name: "@deepseek-ai/dsh-client-connection",
                 inject: ["webServer"],
+              },
+              { id: "workspace", name: "@deepseek-ai/dsh-workspace" },
+              {
+                id: "file-references",
+                name: "@deepseek-ai/dsh-file-reference-local",
+              },
+              {
+                id: "file-uploads",
+                name: "@deepseek-ai/dsh-client-file-upload",
+              },
+              {
+                id: "session-controller",
+                name: "@deepseek-ai/dsh-api-session-controller",
+              },
+              {
+                id: "api-remotes",
+                name: "@deepseek-ai/dsh-api-remotes",
               },
               { id: "metis-host", name: plugin },
             ],

@@ -15,9 +15,29 @@ Node.js 补丁版本会直接影响可用性。同一 dsh 在 Node.js 24.18.0 �
 
 2026-11-18 在当前 Linux x64 开发环境中，Rust 监督层已验证真实 dsh 的启动与关闭、启动超时清理、父进程被强制终止后的普通进程组清理和重新启动。探测确认 dsh web 安装了 `SIGTERM` 处理器并以成功状态退出；测试替身同时覆盖了 dsh 正常执行清理时，其脱离原进程组的受管子进程随之停止的路径。
 
-dsh 的原生 Linux 子进程可以脱离原进程组并交由用户级 systemd scope 管理。当前监督层无法回收 dsh 卡死或被提前强杀后遗留的独立 scope，因此[里程碑 0 的强制终止验证](../product-scope.md)仍未完成；需要真实模型任务验证，并为这个失败路径补充外部 scope 清理。多客户端与重连、干净 NixOS 安装以及无显示发行包也仍未验证。
+dsh 的原生 Linux 子进程可以脱离原进程组并交由用户级 systemd scope 管理，因此仅清理进程组不足以覆盖 Host 卡死或被提前强杀的路径；监督层必须同时回收这些 scope。多客户端与重连的后续验证见下文，干净 NixOS 安装以及无显示发行包仍未验证。
 
 2026-11-19 在同一环境使用公开发布包验证了私有 Node.js Host：公开 `runProfile` 装配 `dsh-base`、webserver、client-connection 和 Metis 插件，无需 Electron、private Desktop Host 或上游源码投影。Host 不加载 `dsh-web-app` 时根路径返回 404，但公开 BrowserAuth、HTTP RPC、Cordis 事件、智能体创建与销毁、应用级关闭均通过；固定 Node.js 直接启动原 Desktop Host 的 ready、shutdown 和父进程断开路径也已通过。验证尚未覆盖真实模型轮次、跨客户端流式事件与重连；当前完整 CLI 包的依赖闭包仍包含未装载的 Web 组件，发行裁剪不在本次结论内。
+
+2026-11-20 在同一环境为私有 Host 补齐公开 SessionController、API Remotes 及其工作区、文件引用和上传依赖，仍未加载 Web 前端。Node.js 与 Rust 集成测试已验证认证、事件流就绪、会话创建、follow 初始快照、状态读取、取消与关闭；Rust 客户端复用同一认证 Cookie 完成 HTTP 调用和 WebSocket 逻辑流分流，并对认证信息做错误与调试输出脱敏。真实模型闭环随后通过：相同 requestId 的提示词重试只产生一条逻辑消息，流式与持久化助手输出、审批回答和活动 bash 任务取消均符合预期。审批由测试专用 Cordis 插件确定性触发；模型自行构造沙箱升级请求不在该测试的验证范围内。
+
+2026-11-21 Metis Cordis 插件通过公开 Typert Remote 服务暴露项目打开、单项目读取、UTF-8 文件读取以及 Git 状态和补丁接口，项目身份与 Session 成员关系复用 dsh 的 WorkspaceRegistry。Rust 客户端只提供按项目标识创建 Session 的入口，已验证创建后能从项目记录读回该 Session；项目记录只携带有界的最近 Session 摘要，完整历史由 dsh 的 Session 接口承担。真实系统 Git 测试覆盖有提交和无提交仓库的空状态与空补丁，以及新增、修改、删除和重命名。有提交时补丁以 HEAD 为基线，无提交时使用空树，包含暂存及未暂存的已跟踪改动和已暂存的新增文件；未暂存的未跟踪文件只出现在状态中，完整工作区补丁仍由 GPUI Diff 里程碑验收。
+
+文件路径同时做词法与 realpath 包含检查，测试确认父目录跳转、绝对路径、指向项目外的符号链接和被替换的项目根均被拒绝。文件通过文件句柄读取，拒绝非普通文件并在限定字节数处停止；Host 的文本预算与 Rust 客户端的响应上限可容纳 JSON 最坏转义，非法 UTF-8 会报错而不会替换字符。认证客户端代表主机用户选择项目根，这些检查约束打开后的操作，不构成对同一用户进程主动竞态修改文件系统的沙箱；该对抗场景与远程细粒度授权仍属于认证和项目路径边界验收。
+
+2026-11-21 同一认证入口为两个 Rust 客户端签发独立 Peer 和 `$events` clientId。实测两条 `session/follow` 各自收到相同持久事件，一个客户端直接断开后由另一个客户端连续写入事件，重连快照覆盖断开期间的事件。`session/follow` 不接受 afterSeq 续传参数，快照是带 hasMore 的历史窗口而非完整日志后缀；Rust SessionJournal 以 Replace 发布快照窗口，通过 session/page 向前 prepend 旧页，再以 event.seq 衔接 live Append、去重并拒绝跳号与游标倒退。真实 Host 以受限消息窗口验证了 hasMore 和固定切点逐页 prepend，分页单元测试另覆盖重连后旧游标不再位于快照窗口的情况。审批同时分发到两个客户端，首次回答生效，另一个客户端收到同一 eventId 的取消；迟到回答后的最终快照仍只有一个持久决定。测试同时核对了 inbox 与 user/message 合起来的逻辑提示词只出现一次、两个客户端事件序列一致以及取消后的任务状态。
+
+同一 DSH_HOME 的正常关闭与重启测试形成以下恢复矩阵。活动 turn、assistant chunk 和后台 bash 由测试专用公开适配器与 jobs 接口确定性产生，不依赖真实模型。
+
+| 状态                            | 正常关闭并重启后的实测结果                                                                  |
+| ------------------------------- | ------------------------------------------------------------------------------------------- |
+| 项目、Session header 与事件日志 | 保留原身份并恢复，逻辑消息和 requestId 去重记录不重复                                       |
+| 活动 Agent 与 turn              | 不继续运行；冷状态为 inactive、not running                                                  |
+| assistant 输出                  | 已交付内容随持久结算保留，旧 activeAttempt 和实时帧不 replay                                |
+| 后台 bash 与 job registry       | 进程停止，恢复后的 registry 为空；job/registered 保留，job/settled 仍按上游实际结算情况存在 |
+| 待处理审批                      | 关闭时写入 decided(unavailable)，重启后不重发；新 Rust 客户端在本地拒绝旧 clientId          |
+
+2026-11-22 真实私有 Host 的父进程强杀测试已覆盖活动 Agent 轮次与后台 bash：受控公开模型适配器让 assistant stream 保持打开，公开 jobs 接口启动真实进程。监督层冻结并核验 Host 后，通过 `/proc` 快照记录其 `dsh-subprocess`、`dsh-subprocess-probe` 和 `dsh-terminal` scope，再由 systemctl 强杀这些 unit 的当前成员并释放对应 unit。watchdog 与外层 shutdown deadline 都能执行该兜底，覆盖 Host 无响应和 watchdog 被强杀的路径。测试通过 `/proc` 确认后台进程确实位于独立 scope，清理后对应 unit 不再加载，watchdog、Host 与后台进程均退出，同一 DSH_HOME 随后能启动新的运行时。
 
 ## 接入方式
 

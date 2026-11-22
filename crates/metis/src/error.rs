@@ -79,6 +79,13 @@ pub enum Error {
     #[error("failed to terminate the dsh runtime process tree: {0}")]
     #[diagnostic(code(metis::runtime_kill))]
     RuntimeKill(#[source] io::Error),
+    /// Detached dsh processes could not be collected after Host cleanup.
+    #[error("failed to clean up detached dsh processes: {0}")]
+    #[diagnostic(
+        code(metis::runtime_scope_cleanup),
+        help("inspect `systemctl --user list-units` for leftover dsh scopes and stop them")
+    )]
+    RuntimeScopeCleanup(String),
     /// dsh exited before its listener became ready.
     #[error("dsh exited before its listener became ready ({status}); output:\n{output}")]
     #[diagnostic(
