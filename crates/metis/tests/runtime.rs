@@ -733,6 +733,35 @@ fn read_pid(path: &Path) -> u32 {
 }
 
 #[cfg(unix)]
+fn related_processes(directory: &Path) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let directory = directory.to_string_lossy();
+        let mut processes = Vec::new();
+        for entry in fs::read_dir("/proc").expect("read process table").flatten() {
+            let path = entry.path();
+            let Ok(command) = fs::read(path.join("cmdline")) else {
+                continue;
+            };
+            let command = String::from_utf8_lossy(&command);
+            if command.contains(directory.as_ref()) {
+                processes.push(format!("{}: {command}", path.display()));
+            }
+        }
+        if processes.is_empty() {
+            "none".to_owned()
+        } else {
+            processes.join("\n")
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = directory;
+        "unavailable".to_owned()
+    }
+}
+
+#[cfg(unix)]
 fn wait_for_job_pid(directory: &Path, diagnostics: impl Fn() -> String) -> u32 {
     let pid_path = directory.join("metis-test-job.pid");
     let error_path = directory.join("metis-test-job.error");
@@ -741,6 +770,12 @@ fn wait_for_job_pid(directory: &Path, diagnostics: impl Fn() -> String) -> u32 {
         if let Ok(error) = fs::read_to_string(&error_path) {
             panic!(
                 "controlled bash job failed: {error}\nHost output:\n{}",
+                diagnostics()
+            );
+        }
+        if let Ok(done) = fs::read_to_string(directory.join("metis-test-job.done")) {
+            panic!(
+                "controlled bash exited without a usable PID: {done}\nHost output:\n{}",
                 diagnostics()
             );
         }
@@ -756,8 +791,9 @@ fn wait_for_job_pid(directory: &Path, diagnostics: impl Fn() -> String) -> u32 {
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for controlled bash PID file\nHost output:\n{}",
-            diagnostics()
+            "timed out waiting for controlled bash PID file\nHost output:\n{}\nRelated processes:\n{}",
+            diagnostics(),
+            related_processes(directory)
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -1347,8 +1383,6 @@ async fn project_and_git_workflows_use_real_host() {
 
     #[cfg(unix)]
     {
-        use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
-
         let fifo = project.join("fifo");
         let status = Command::new("mkfifo")
             .arg(&fifo)
@@ -1365,17 +1399,22 @@ async fn project_and_git_workflows_use_real_host() {
             "FIFO must reject promptly: {result:?}"
         );
 
-        let invalid_name = OsString::from_vec(vec![b'f', 0xff]);
-        fs::write(project.join(invalid_name), "invalid UTF-8 name\n")
-            .expect("write non-UTF-8 filename");
-        let error = client
-            .git_status(&opened.project_id)
-            .await
-            .expect_err("non-UTF-8 Git output must not be lossy");
-        assert!(
-            matches!(error, ClientError::Remote { ref code, .. } if code == "git/command-failed"),
-            "unexpected non-UTF-8 Git error: {error}"
-        );
+        #[cfg(target_os = "linux")]
+        {
+            use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+            let invalid_name = OsString::from_vec(vec![b'f', 0xff]);
+            fs::write(project.join(invalid_name), "invalid UTF-8 name\n")
+                .expect("write non-UTF-8 filename");
+            let error = client
+                .git_status(&opened.project_id)
+                .await
+                .expect_err("non-UTF-8 Git output must not be lossy");
+            assert!(
+                matches!(error, ClientError::Remote { ref code, .. } if code == "git/command-failed"),
+                "unexpected non-UTF-8 Git error: {error}"
+            );
+        }
 
         let replaced = directory.path.join("replaced");
         fs::create_dir(&replaced).expect("create replaceable project");

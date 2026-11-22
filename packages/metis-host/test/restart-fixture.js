@@ -98,6 +98,16 @@ function startBashJob(ctx, agent) {
           console.log("[metis-test] bash process started");
           if (abort.signal.aborted) proc.kill();
           await proc.done;
+          writeFileSync(
+            join(agent.session.header.cwd, "metis-test-job.done"),
+            JSON.stringify({
+              status: proc.status,
+              exitCode: proc.exitCode,
+              signal: proc.signal,
+              stdout: proc.observed.stdout.readFrom(0).text,
+              stderr: proc.observed.stderr.readFrom(0).text,
+            }),
+          );
           return proc.status === "killed"
             ? { status: "killed", detail: proc.signal ?? "killed" }
             : { status: "completed", detail: `exit code: ${proc.exitCode ?? 0}` };
