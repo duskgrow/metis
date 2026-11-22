@@ -836,6 +836,7 @@ fn force_stop_dsh(child: &mut dyn ChildWrapper) -> Result<()> {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
 fn kill_detached_command_groups(owner: HostIdentity) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -911,6 +912,7 @@ fn process_relation_from_stat(stat: &[u8]) -> Option<(i32, i32)> {
     Some((parent, group))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
 fn host_identity(platform: &dyn RuntimePlatform, pid: u32) -> Result<HostIdentity> {
     #[cfg(target_os = "linux")]
     {
@@ -942,6 +944,7 @@ fn write_cleanup_done() -> io::Result<()> {
     output.flush()
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
 fn stop_host_and_collect_scopes(
     child: &mut dyn ChildWrapper,
     platform: &dyn RuntimePlatform,
@@ -980,6 +983,7 @@ fn stop_host_and_collect_scopes(
 
 type ScopeSnapshot = BTreeSet<String>;
 
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
 fn discover_systemd_scopes(
     platform: &dyn RuntimePlatform,
     identity: HostIdentity,
@@ -1014,6 +1018,7 @@ fn discover_systemd_scopes(
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
 fn cleanup_scopes(platform: &dyn RuntimePlatform, snapshot: &ScopeSnapshot) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
