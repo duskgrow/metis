@@ -3,7 +3,11 @@
 //! `--help` and `--version` are generated from the clap definitions.
 
 use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+    time::Duration,
+};
 #[cfg(feature = "workbench")]
 use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
@@ -24,8 +28,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CliCommand {
+    #[command(
+        name = "host",
+        about = "Run a persistent Host without opening the workbench"
+    )]
+    Host(HostArgs),
     #[command(name = "__dsh-watchdog", hide = true)]
     DshWatchdog(WatchdogArgs),
+}
+
+#[derive(Args)]
+struct HostArgs {
+    /// Directory for persistent Host state and the private connection file
+    #[arg(long, value_name = "PATH")]
+    home: PathBuf,
+    /// Node.js executable; defaults to the packaged sibling executable
+    #[arg(long, value_name = "PATH")]
+    node: Option<PathBuf>,
+    /// Metis Host entry point; defaults to the packaged lib/metis-host directory
+    #[arg(long, value_name = "PATH")]
+    host_entrypoint: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -40,15 +62,110 @@ struct WatchdogArgs {
 
 fn main() -> miette::Result<()> {
     init_tracing();
-    if let Some(CliCommand::DshWatchdog(args)) = Cli::parse().command {
-        return metis::runtime::run_watchdog(&metis::runtime::WatchdogConfig {
-            node_executable: args.node,
-            host_entrypoint: args.host,
-            home: args.home,
-        })
-        .map_err(Into::into);
+    match Cli::parse().command {
+        Some(CliCommand::Host(args)) => run_host(args),
+        Some(CliCommand::DshWatchdog(args)) => {
+            metis::runtime::run_watchdog(&metis::runtime::WatchdogConfig {
+                node_executable: args.node,
+                host_entrypoint: args.host,
+                home: args.home,
+            })
+            .map_err(Into::into)
+        }
+        None => run_entrypoint(),
     }
-    run_entrypoint()
+}
+
+fn run_host(args: HostArgs) -> miette::Result<()> {
+    let executable = std::env::current_exe().map_err(metis::Error::RuntimeLocate)?;
+    let binary_directory = executable.parent().ok_or_else(installation_layout_error)?;
+    let node_executable = args
+        .node
+        .unwrap_or_else(|| binary_directory.join(if cfg!(windows) { "node.exe" } else { "node" }));
+    let host_entrypoint = match args.host_entrypoint {
+        Some(path) => path,
+        None => binary_directory
+            .parent()
+            .ok_or_else(installation_layout_error)?
+            .join("lib")
+            .join("metis-host")
+            .join("lib")
+            .join("host.js"),
+    };
+    let async_runtime = tokio::runtime::Runtime::new().map_err(metis::Error::RuntimeExecutor)?;
+    let mut signals = {
+        let _runtime = async_runtime.enter();
+        shutdown_signals().map_err(metis::Error::RuntimeSignal)?
+    };
+    let running = metis::headless::Headless::start(
+        &metis::runtime::DshSupervisor::system(),
+        &metis::headless::HeadlessConfig {
+            runtime: metis::runtime::DshRuntimeConfig {
+                metis_executable: executable,
+                node_executable,
+                host_entrypoint,
+                home: args.home,
+                startup_timeout: Duration::from_secs(30),
+                shutdown_timeout: Duration::from_secs(15),
+            },
+            poll_interval: Duration::from_millis(250),
+        },
+    )?;
+    let mut output = io::stdout().lock();
+    writeln!(output, "{}", running.connection_file().display())
+        .and_then(|()| output.flush())
+        .map_err(|_| metis::Error::RuntimeOutputCapture)?;
+    drop(output);
+    async_runtime
+        .block_on(running.wait(shutdown_signal(&mut signals)))
+        .map_err(Into::into)
+}
+
+fn installation_layout_error() -> metis::Error {
+    metis::Error::RuntimeLocate(io::Error::new(
+        io::ErrorKind::NotFound,
+        "the executable has no installation root",
+    ))
+}
+
+#[cfg(unix)]
+struct ShutdownSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(windows)]
+struct ShutdownSignals {
+    interrupt: tokio::signal::windows::CtrlC,
+}
+
+#[cfg(unix)]
+fn shutdown_signals() -> io::Result<ShutdownSignals> {
+    Ok(ShutdownSignals {
+        interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
+        terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+    })
+}
+
+#[cfg(windows)]
+fn shutdown_signals() -> io::Result<ShutdownSignals> {
+    Ok(ShutdownSignals {
+        interrupt: tokio::signal::windows::ctrl_c()?,
+    })
+}
+
+#[cfg(unix)]
+async fn shutdown_signal(signals: &mut ShutdownSignals) -> io::Result<()> {
+    tokio::select! {
+        _ = signals.interrupt.recv() => Ok(()),
+        _ = signals.terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+async fn shutdown_signal(signals: &mut ShutdownSignals) -> io::Result<()> {
+    signals.interrupt.recv().await;
+    Ok(())
 }
 
 #[cfg(feature = "workbench")]

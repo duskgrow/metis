@@ -16,15 +16,46 @@ use thiserror::Error;
 /// public interface — removing or renaming one is a `SemVer`-breaking change.
 #[derive(Debug, Error, Diagnostic)]
 pub enum Error {
-    /// The headless runtime entry point is not implemented yet.
-    #[error("Metis headless runtime is not implemented yet")]
+    /// A headless build was started without selecting its Host entry point.
+    #[error("no entry point selected for the Metis headless build")]
     #[diagnostic(
         code(metis::runtime_unavailable),
-        help(
-            "use a build with the default `workbench` feature; the headless runtime is not implemented yet"
-        )
+        help("run `metis host --home <PATH>` to start a persistent Host")
     )]
     RuntimeUnavailable,
+    /// The installed executable location could not be determined.
+    #[error("failed to locate the Metis installation: {0}")]
+    #[diagnostic(
+        code(metis::runtime_locate),
+        help("reinstall the complete Metis package in its standard bin/lib layout")
+    )]
+    RuntimeLocate(#[source] io::Error),
+    /// The Host connection file could not be replaced or retired.
+    #[error("failed to update Host connection file `{}`: {source}", .path.display())]
+    #[diagnostic(
+        code(metis::runtime_connection),
+        help("check that the Host state directory is writable by the current user")
+    )]
+    RuntimeConnection {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    /// Another persistent Host already owns the selected state directory.
+    #[error("another Metis Host already uses `{}`", .home.display())]
+    #[diagnostic(
+        code(metis::runtime_already_running),
+        help("stop the existing Host or choose a different --home directory")
+    )]
+    RuntimeAlreadyRunning { home: PathBuf },
+    /// The asynchronous executor could not be created.
+    #[error("failed to create the Host executor: {0}")]
+    #[diagnostic(code(metis::runtime_executor))]
+    RuntimeExecutor(#[source] io::Error),
+    /// Listening for the headless process shutdown signal failed.
+    #[error("failed to listen for Host shutdown: {0}")]
+    #[diagnostic(code(metis::runtime_signal))]
+    RuntimeSignal(#[source] io::Error),
     /// The workbench was started without a graphical session.
     #[error("no graphical session detected")]
     #[diagnostic(
@@ -117,7 +148,7 @@ pub enum Error {
     #[error("failed to read the workbench lifetime pipe: {0}")]
     #[diagnostic(code(metis::runtime_parent_pipe))]
     RuntimeParentPipe(#[source] io::Error),
-    /// dsh exited unsuccessfully while the workbench was still alive.
+    /// dsh exited unsuccessfully while its owner was still alive.
     #[error("dsh exited unexpectedly: {0}")]
     #[diagnostic(code(metis::runtime_exit))]
     RuntimeDshExit(ExitStatus),

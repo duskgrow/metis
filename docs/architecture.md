@@ -35,7 +35,9 @@ flowchart TD
 
 本地工作台自动启动仅供当前界面接入的 Host。Host 启动后报告实际回环地址和实例认证入口；正常关闭先由 dsh 清理应用与智能体，异常退出由 Rust 监督层回收进程树。再次打开工作台会创建新的运行时。
 
-用于持续运行或跨设备接入的主机复用同一 Host 并常驻运行，客户端断开不影响其管理的智能体。Harness 重启后的历史恢复与运行状态恢复范围，见[集成调研](research/deepseek-harness.md)。
+用于持续运行或跨设备接入的主机复用同一 Host 并常驻运行，客户端断开不影响其管理的智能体。无显示运行包通过 `metis host --home <状态目录>` 启动；就绪后，当前实例的连接地址和认证入口保存在状态目录的 `connection.json`，标准输出仅发布该文件路径，不输出认证参数。该文件在 Unix 上仅当前用户可读写，并随 Host 正常停止而删除。SIGINT 与 SIGTERM 均进入同一应用级清理流程。
+
+Harness 重启后的历史恢复与运行状态恢复范围，见[集成调研](research/deepseek-harness.md)。发行依赖裁剪和 Linux 可移植性依据见[架构决策记录 0012](decisions/0012-package-portable-headless-host.md)。
 
 ## 网络功能
 

@@ -5,6 +5,7 @@
 
 pub mod client;
 mod error;
+pub mod headless;
 pub mod journal;
 pub mod runtime;
 

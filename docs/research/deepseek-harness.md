@@ -39,6 +39,8 @@ dsh 的原生 Linux 子进程可以脱离原进程组并交由用户级 systemd 
 
 2026-11-22 真实私有 Host 的父进程强杀测试已覆盖活动 Agent 轮次与后台 bash：受控公开模型适配器让 assistant stream 保持打开，公开 jobs 接口启动真实进程。监督层冻结并核验 Host 后，通过 `/proc` 快照记录其 `dsh-subprocess`、`dsh-subprocess-probe` 和 `dsh-terminal` scope，再由 systemctl 强杀这些 unit 的当前成员并释放对应 unit。watchdog 与外层 shutdown deadline 都能执行该兜底，覆盖 Host 无响应和 watchdog 被强杀的路径。测试通过 `/proc` 确认后台进程确实位于独立 scope，清理后对应 unit 不再加载，watchdog、Host 与后台进程均退出，同一 DSH_HOME 随后能启动新的运行时。
 
+同日的无显示运行包保留公开 `runProfile`，以 Host 自身清单作为插件解析锚点，并裁剪完整 CLI 清单中的未使用启动依赖。归档在本机 NixOS 的隔离 HOME、无显示变量和受限 PATH 下，以及仅安装系统 Git 的 Ubuntu 24.04 容器中，均完成解包、启动、认证、Session 创建与取消及真实 Git 调用。Metis 的 Linux 二进制为静态 musl，随包 Node.js 由相对路径启动器和随附运行库加载；干净 NixOS 系统安装仍需按里程碑清单验证。
+
 ## 接入方式
 
 Metis 的私有 Node.js Host 调用公开 `runProfile`，通过 app-owned profile 和 Cordis 插件为 dsh 添加项目、Git 以及主机／项目／会话映射。工作台直接连接该 Host，使用 Harness 的会话、事件、审批和任务能力。

@@ -24,3 +24,8 @@ allowBuilds:
 auditConfig:
   ignoreGhsas:
     - GHSA-fc5q-39xc-vjpf
+
+# Metis loads only dsh/profile-boot. Narrow the installed manifest, then let
+# package-headless prune the unreachable production graph (ADR-0012).
+patchedDependencies:
+  '@deepseek-ai/dsh@0.2.2-rc.3': patches/@deepseek-ai__dsh@0.2.2-rc.3.patch

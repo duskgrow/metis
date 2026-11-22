@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -68,11 +69,13 @@ async function waitReady(host) {
   return result;
 }
 
-async function postRpc(webUrl, cookie, method, request) {
+async function requestRpc(webUrl, cookie, method, request) {
   const rpcId = `metis-host-test:${method}`;
+  const headers = { "content-type": "application/json" };
+  if (cookie !== undefined) headers.cookie = cookie;
   const response = await fetch(new URL(`/api/${method}`, webUrl), {
     method: "POST",
-    headers: { "content-type": "application/json", cookie },
+    headers,
     body: JSON.stringify({
       type: "client-request",
       rpcId,
@@ -81,6 +84,11 @@ async function postRpc(webUrl, cookie, method, request) {
     }),
     signal: AbortSignal.timeout(10_000),
   });
+  return { response, rpcId };
+}
+
+async function postRpc(webUrl, cookie, method, request) {
+  const { response, rpcId } = await requestRpc(webUrl, cookie, method, request);
   assert.equal(response.status, 200);
   const envelope = await response.json();
   assert.equal(envelope.type, "server-response");
@@ -88,7 +96,47 @@ async function postRpc(webUrl, cookie, method, request) {
   return envelope;
 }
 
-test("the private host boots public dsh capabilities without a frontend", {
+function forgeCookieSignature(cookie) {
+  const separator = cookie.indexOf("=");
+  const parts = cookie.slice(separator + 1).split(".");
+  assert.equal(parts.length, 3, "session cookie must have a signed payload");
+  const signature = parts[2];
+  assert.ok(
+    /^[A-Za-z0-9_-]+$/u.test(signature),
+    "session cookie signature must be base64url",
+  );
+  parts[2] = `${signature.startsWith("A") ? "B" : "A"}${signature.slice(1)}`;
+  return `${cookie.slice(0, separator + 1)}${parts.join(".")}`;
+}
+
+async function assertWebSocketRejected(webUrl, cookie) {
+  const headers = {
+    connection: "Upgrade",
+    upgrade: "websocket",
+    "sec-websocket-key": Buffer.alloc(16).toString("base64"),
+    "sec-websocket-version": "13",
+  };
+  if (cookie !== undefined) headers.cookie = cookie;
+  const status = await new Promise((resolve, reject) => {
+    const request = httpRequest(new URL("/api/remote.mux", webUrl), {
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+    request.once("response", (response) => {
+      response.resume();
+      response.once("end", () => resolve(response.statusCode));
+    });
+    request.once("upgrade", (response, socket) => {
+      socket.destroy();
+      resolve(response.statusCode);
+    });
+    request.once("error", reject);
+    request.end();
+  });
+  assert.equal(status, 401, "unauthenticated WebSocket upgrade must be rejected");
+}
+
+test("the private host requires authentication and boots public dsh capabilities without a frontend", {
   timeout: 30_000,
 }, async (t) => {
   const host = await launch(t);
@@ -109,6 +157,22 @@ test("the private host boots public dsh capabilities without a frontend", {
   assert.ok(setCookie);
   const cookie = setCookie.split(";", 1)[0];
   assert.ok(cookie.includes("="));
+
+  for (const candidate of [undefined, forgeCookieSignature(cookie)]) {
+    const { response, rpcId } = await requestRpc(
+      webUrl,
+      candidate,
+      "project/open",
+      { path: host.home },
+    );
+    const body = await response.text();
+    assert.equal(
+      response.status,
+      401,
+      `unauthenticated ${rpcId} must be rejected: ${body}`,
+    );
+    await assertWebSocketRejected(webUrl, candidate);
+  }
 
   const opened = await postRpc(webUrl, cookie, "project/open", {
     path: host.home,

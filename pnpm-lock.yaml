@@ -10,6 +10,9 @@ overrides:
   '@modelcontextprotocol/client@>=2.0.0 <2.3.0': 2.3.0
   '@modelcontextprotocol/core@>=2.0.0 <2.3.0': 2.3.0
 
+patchedDependencies:
+  '@deepseek-ai/dsh@0.2.2-rc.3': 8576094520828366b1807432b0c09136415fc1f69e015a5d542686a07613a3b5
+
 importers:
 
   .:
@@ -28,7 +31,7 @@ importers:
     dependencies:
       '@deepseek-ai/dsh':
         specifier: 0.2.2-rc.3
-        version: 0.2.2-rc.3(c2602e2272161eef727ec1fe29e07f51)
+        version: 0.2.2-rc.3(patch_hash=8576094520828366b1807432b0c09136415fc1f69e015a5d542686a07613a3b5)(c2602e2272161eef727ec1fe29e07f51)
       '@deepseek-ai/dsh-api-remotes':
         specifier: 0.2.2-rc.3
         version: 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-scope@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0))
@@ -8020,7 +8023,7 @@ snapshots:
       '@deepseek-ai/dsh-typert-protocol': 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)
       zod: 4.6.6
 
-  '@deepseek-ai/dsh@0.2.2-rc.3(c2602e2272161eef727ec1fe29e07f51)':
+  '@deepseek-ai/dsh@0.2.2-rc.3(patch_hash=8576094520828366b1807432b0c09136415fc1f69e015a5d542686a07613a3b5)(c2602e2272161eef727ec1fe29e07f51)':
     dependencies:
       '@deepseek-ai/cordis': 4.1.0(@deepseek-ai/cordis-plugin-include@1.1.0)(@deepseek-ai/cordis-plugin-loader@1.1.0)
       '@deepseek-ai/cordis-plugin-include': 1.1.0(@deepseek-ai/cordis-plugin-loader@1.1.0)(@deepseek-ai/cordis@4.1.0)

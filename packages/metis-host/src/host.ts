@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
+
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -144,9 +144,7 @@ async function main(): Promise<void> {
     }\n`,
   );
 
-  const installAnchor = createRequire(import.meta.url).resolve(
-    "@deepseek-ai/dsh/package.json",
-  );
+  const installAnchor = fileURLToPath(new URL("../package.json", import.meta.url));
   const profile = loadProfileDirectory("dsh", profileDir, installAnchor);
   reportSkippedBundles("dsh", profile);
   running = await runProfile({

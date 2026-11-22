@@ -226,6 +226,16 @@ impl DshRuntime {
         self.auth_url.as_deref().expect("runtime is ready")
     }
 
+    /// Return the watchdog exit status when it has exited, or `None` while the
+    /// runtime is still active. The caller retains ownership for cleanup.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        self.child
+            .as_mut()
+            .expect("runtime is active")
+            .try_wait()
+            .map_err(Error::RuntimeWait)
+    }
+
     /// Recent combined stdout/stderr for diagnostics. The buffer is bounded;
     /// this is not a durable log or an event stream.
     #[must_use]

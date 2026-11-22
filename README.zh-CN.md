@@ -16,7 +16,7 @@
 
 ## 使用
 
-启动 `metis` 可打开工作台；`metis --help` 查看命令帮助。
+启动 `metis` 可打开工作台；`metis --help` 查看命令帮助。无显示运行包使用 `bin/metis host --home <状态目录>` 启动常驻 Host。
 
 ## 设计文档
 

@@ -18,6 +18,7 @@ use metis::{
         ApprovalOutcome, ApprovalRequest, ClientError, DshClient, DshClientConfig, DshStream,
         HostEvent,
     },
+    headless::{CONNECTION_FILE_NAME, Headless, HeadlessConfig},
     journal::SessionJournal,
     runtime::{DshRuntimeConfig, DshSupervisor},
 };
@@ -116,6 +117,32 @@ fn real_dsh_loads_plugin_and_stops() {
         TcpStream::connect(address).is_err(),
         "the dsh listener must close with its runtime"
     );
+}
+
+#[tokio::test]
+async fn headless_exit_retires_connection_file() {
+    let directory = TestDirectory::new("headless-exit");
+    let script = directory.write(
+        "exit-after-ready.cjs",
+        &with_web_server("setTimeout(() => process.exit(0), 100);"),
+    );
+    let home = directory.path.join("dsh-home");
+    let running = Headless::start(
+        &DshSupervisor::system(),
+        &HeadlessConfig {
+            runtime: runtime_config(&directory, script),
+            poll_interval: Duration::from_millis(5),
+        },
+    )
+    .expect("start persistent Host");
+    let connection_file = home.join(CONNECTION_FILE_NAME);
+    assert_eq!(running.connection_file(), connection_file.as_path());
+    let error = running
+        .wait(std::future::pending::<std::io::Result<()>>())
+        .await
+        .expect_err("Host exit while its owner is alive must fail");
+    assert!(matches!(error, Error::RuntimeDshExit(_)));
+    assert!(!connection_file.exists());
 }
 
 #[test]
@@ -1214,6 +1241,9 @@ async fn project_and_git_workflows_use_real_host() {
     let directory = TestDirectory::new("project-git");
     let project = directory.path.join("repo");
     fs::create_dir(&project).expect("create Git project");
+    let nested = project.join("nested");
+    fs::create_dir(&nested).expect("create nested project");
+    fs::write(nested.join("inside.txt"), "before\n").expect("write nested tracked file");
     fs::write(project.join("tracked.txt"), "before\n").expect("write tracked file");
     fs::write(project.join("deleted.txt"), "delete me\n").expect("write deleted file");
     fs::write(project.join("rename-old.txt"), "rename me\n").expect("write renamed file");
@@ -1339,6 +1369,34 @@ async fn project_and_git_workflows_use_real_host() {
     );
     assert!(patch.contains("rename to rename-new.txt"), "patch: {patch}");
     assert!(patch.contains("+staged and unstaged"), "patch: {patch}");
+
+    fs::write(nested.join("inside.txt"), "after\n").expect("modify nested tracked file");
+    let nested_project = client
+        .open_project(&nested.to_string_lossy())
+        .await
+        .expect("open a nested directory as its own project");
+    let nested_status = client
+        .git_status(&nested_project.project_id)
+        .await
+        .expect("read nested project status");
+    assert!(
+        nested_status.contains("inside.txt"),
+        "status: {nested_status:?}"
+    );
+    assert!(
+        !nested_status.contains("tracked.txt"),
+        "nested status exposed parent changes: {nested_status:?}"
+    );
+    let nested_patch = client
+        .git_diff(&nested_project.project_id)
+        .await
+        .expect("read nested project patch");
+    assert!(nested_patch.contains("inside.txt"), "patch: {nested_patch}");
+    assert!(nested_patch.contains("+after"), "patch: {nested_patch}");
+    assert!(
+        !nested_patch.contains("tracked.txt"),
+        "nested diff exposed parent changes: {nested_patch}"
+    );
 
     let unborn = directory.path.join("unborn");
     fs::create_dir(&unborn).expect("create unborn Git project");
