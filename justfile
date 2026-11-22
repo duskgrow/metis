@@ -52,9 +52,18 @@ lint: _js-install
 test: _js-install
     pnpm --filter @metis/dsh-host test
     node --test scripts/check-js-licenses.test.mjs
+    node --test scripts/prune-production.test.mjs
     cargo nextest run --workspace --all-targets
     cargo nextest run -p metis --no-default-features --test cli
     cargo test --doc --workspace
+
+# Build a portable archive containing the headless Rust binary, Node.js, dsh and the Metis extension
+headless-package: _js-install
+    node scripts/package-headless.mjs
+
+# Extract the latest headless archive and exercise Host, sessions and real Git without display libraries
+headless-smoke: headless-package
+    node scripts/smoke-headless.mjs
 
 # Build docs (rustdoc warnings are errors; RUSTDOCFLAGS injected at the top of this file)
 doc:

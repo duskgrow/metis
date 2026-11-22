@@ -6,3 +6,4 @@
 [toolchain]
 channel = "1.100.0"
 components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]

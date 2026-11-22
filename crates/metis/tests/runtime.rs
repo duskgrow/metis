@@ -18,6 +18,7 @@ use metis::{
         ApprovalOutcome, ApprovalRequest, ClientError, DshClient, DshClientConfig, DshStream,
         HostEvent,
     },
+    headless::{CONNECTION_FILE_NAME, Headless, HeadlessConfig},
     journal::SessionJournal,
     runtime::{DshRuntimeConfig, DshSupervisor},
 };
@@ -116,6 +117,32 @@ fn real_dsh_loads_plugin_and_stops() {
         TcpStream::connect(address).is_err(),
         "the dsh listener must close with its runtime"
     );
+}
+
+#[tokio::test]
+async fn headless_exit_retires_connection_file() {
+    let directory = TestDirectory::new("headless-exit");
+    let script = directory.write(
+        "exit-after-ready.cjs",
+        &with_web_server("setTimeout(() => process.exit(0), 100);"),
+    );
+    let home = directory.path.join("dsh-home");
+    let running = Headless::start(
+        &DshSupervisor::system(),
+        &HeadlessConfig {
+            runtime: runtime_config(&directory, script),
+            poll_interval: Duration::from_millis(5),
+        },
+    )
+    .expect("start persistent Host");
+    let connection_file = home.join(CONNECTION_FILE_NAME);
+    assert_eq!(running.connection_file(), connection_file.as_path());
+    let error = running
+        .wait(std::future::pending::<std::io::Result<()>>())
+        .await
+        .expect_err("Host exit while its owner is alive must fail");
+    assert!(matches!(error, Error::RuntimeDshExit(_)));
+    assert!(!connection_file.exists());
 }
 
 #[test]

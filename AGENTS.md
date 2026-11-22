@@ -11,6 +11,7 @@
 - Snapshot updates: `just snapshot-review` (approve each diff by hand; never bulk-accept)
 - New crate: `just new-crate <name>`
 - Dependency policy: `just deny`; docs build: `just doc`; release-artifact drift check: `just dist-check`; agent-doc smoke check: `just agent-check`
+- Headless package / extracted-archive smoke: `just headless-package` / `just headless-smoke`
 - Toolchain bump: `just toolchain-bump` (also run weekly by CI, which opens a validated PR)
 
 ## Environment
@@ -35,7 +36,7 @@ Done = `just ci` green + the `pr-preflight` checklist clean.
 
 ## NEVER
 
-- NEVER hand-edit generated files: `Cargo.lock`, `pnpm-lock.yaml`, any generated entries in `CHANGELOG.md` (including released sections), `.github/workflows/release.yml` (generator: `dist generate`; drift check: `just dist-check`).
+- NEVER hand-edit generated files: `Cargo.lock`, `pnpm-lock.yaml`, `patches/*.patch` (regenerate with `pnpm patch` / `pnpm patch-commit`), any generated entries in `CHANGELOG.md` (including released sections), `.github/workflows/release.yml` (generator: `dist generate`; drift check: `just dist-check`).
 - NEVER write multi-line logic in a CI YAML `run:` field — sink it into the justfile; CI only calls single-line entry points.
 - NEVER hand-write version numbers: the single storage point is `[workspace.package] version` in the root `Cargo.toml`; release-plz rewrites it mechanically.
 - NEVER commit code that hasn't passed `just ci`; NEVER assemble ad-hoc check pipelines that bypass just.

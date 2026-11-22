@@ -20,7 +20,7 @@ and publishing the crate; see the Releasing section in CONTRIBUTING.md.
 
 ## Usage
 
-Run `metis` to open the workbench. Use `metis --help` for command help.
+Run `metis` to open the workbench. Use `metis --help` for command help. In a headless package, run `bin/metis host --home <state-directory>` to start a persistent Host.
 
 ## Design
 
