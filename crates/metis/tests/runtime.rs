@@ -524,7 +524,7 @@ async fn unresponsive_host_shutdown_cleans_detached_job() {
         )
         .await
         .expect("start live work before unresponsive Host shutdown");
-    let job = wait_for_job_pid(&directory.path);
+    let job = wait_for_job_pid(&directory.path, || runtime.output_snapshot());
     wait_until(
         || {
             runtime
@@ -648,7 +648,7 @@ fn run_real_crash_fixture_parent() {
             )
             .await
             .expect("start real Agent work before the workbench crash");
-        let _ = wait_for_job_pid(&directory);
+        let _ = wait_for_job_pid(&directory, || runtime.output_snapshot());
         wait_until(
             || {
                 runtime
@@ -692,6 +692,7 @@ fn approval_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
     fixture_runtime_config(directory, "approval-fixture.js")
 }
 
+#[cfg(unix)]
 fn restart_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
     fixture_runtime_config(directory, "restart-fixture.js")
 }
@@ -732,22 +733,29 @@ fn read_pid(path: &Path) -> u32 {
 }
 
 #[cfg(unix)]
-fn wait_for_job_pid(directory: &Path) -> u32 {
+fn wait_for_job_pid(directory: &Path, diagnostics: impl Fn() -> String) -> u32 {
     let pid_path = directory.join("metis-test-job.pid");
     let error_path = directory.join("metis-test-job.error");
-    wait_until(
-        || {
-            if let Ok(error) = fs::read_to_string(&error_path) {
-                panic!("controlled bash job failed: {error}");
-            }
-            fs::read_to_string(&pid_path)
-                .ok()
-                .and_then(|pid| pid.trim().parse::<u32>().ok())
-                .is_some()
-        },
-        "controlled bash PID file",
-    );
-    read_pid(&pid_path)
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(error) = fs::read_to_string(&error_path) {
+            panic!(
+                "controlled bash job failed: {error}\nHost output:\n{}",
+                diagnostics()
+            );
+        }
+        if let Ok(pid) = fs::read_to_string(&pid_path)
+            && let Ok(pid) = pid.trim().parse()
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for controlled bash PID file\nHost output:\n{}",
+            diagnostics()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn publish_watchdog_pid(directory: &Path, pid: u32) {
@@ -1828,7 +1836,7 @@ async fn host_restart_drops_live_turn_output_and_job() {
         )
         .await
         .expect("start controlled live work");
-    let pid = wait_for_job_pid(&directory.path);
+    let pid = wait_for_job_pid(&directory.path, || runtime.output_snapshot());
     wait_until(
         || {
             let output = runtime.output_snapshot();
