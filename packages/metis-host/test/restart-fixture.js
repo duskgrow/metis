@@ -66,10 +66,16 @@ function reportJobError(agent, error) {
   );
 }
 
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 function startBashJob(ctx, agent) {
   let proc;
+  const pidPath = shellQuote(join(agent.session.header.cwd, "metis-test-job.pid"));
+  const cwdPath = shellQuote(join(agent.session.header.cwd, "metis-test-job.cwd"));
   const spec = ctx.shell.resolve({
-    command: "printf 'METIS_JOB_STARTED\\n'; printf '%s' \"$$\" > metis-test-job.pid; exec sleep 30",
+    command: `printf 'METIS_JOB_STARTED\\n'; pwd > ${cwdPath}; printf '%s' "$$" > ${pidPath}; exec sleep 30`,
     workdir: agent.session.header.cwd,
     onExpiry: "none",
   });

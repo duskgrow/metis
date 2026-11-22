@@ -747,6 +747,11 @@ fn wait_for_job_pid(directory: &Path, diagnostics: impl Fn() -> String) -> u32 {
         if let Ok(pid) = fs::read_to_string(&pid_path)
             && let Ok(pid) = pid.trim().parse()
         {
+            let cwd = fs::read_to_string(directory.join("metis-test-job.cwd"))
+                .expect("read controlled bash working directory");
+            let actual = fs::canonicalize(cwd.trim()).expect("resolve controlled bash cwd");
+            let expected = fs::canonicalize(directory).expect("resolve Session cwd");
+            assert_eq!(actual, expected, "bash must run in the Session directory");
             return pid;
         }
         assert!(
