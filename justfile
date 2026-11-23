@@ -69,6 +69,10 @@ headless-smoke: headless-package
 native-editor-smoke:
     node scripts/smoke-native-editor.mjs
 
+# Run the same native Editor acceptance in an Ubuntu 24.04 Docker environment
+native-editor-smoke-ubuntu:
+    node scripts/smoke-native-editor-ubuntu.mjs
+
 # Build docs (rustdoc warnings are errors; RUSTDOCFLAGS injected at the top of this file)
 doc:
     cargo doc --no-deps --workspace
