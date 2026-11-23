@@ -254,6 +254,8 @@ try {
     [
       "run",
       "--rm",
+      "--user",
+      `${process.getuid()}:${process.getgid()}`,
       "--name",
       container,
       "--env",
