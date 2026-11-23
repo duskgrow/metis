@@ -65,6 +65,10 @@ headless-package: _js-install
 headless-smoke: headless-package
     node scripts/smoke-headless.mjs
 
+# Exercise a real Editor through isolated Wayland, Fcitx5, cross-process clipboard and native pixels
+native-editor-smoke:
+    node scripts/smoke-native-editor.mjs
+
 # Build docs (rustdoc warnings are errors; RUSTDOCFLAGS injected at the top of this file)
 doc:
     cargo doc --no-deps --workspace

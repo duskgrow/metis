@@ -44,15 +44,25 @@
           ]) ++ (with pkgs; lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             clang
             cmake
+            dbus
             fontconfig
+            grim
+            (qt6Packages.fcitx5-with-addons.override {
+              addons = [ qt6Packages.fcitx5-chinese-addons ];
+            })
             libxkbcommon
             libxcb
             libX11
+            mesa
+            noto-fonts-cjk-sans
             openssl
             pkg-config
+            sway
             vulkan-loader
             wayland
             webkitgtk_4_1
+            wl-clipboard
+            wtype
             zstd
           ]);
 
@@ -65,6 +75,15 @@
               pkgs.libglvnd
               pkgs.wayland
             ]);
+
+          # Native Editor smoke runs in an isolated Wayland session with fixed CJK
+          # fonts and Mesa's software Vulkan driver, not the developer's desktop.
+          METIS_NATIVE_FONTCONFIG_FILE = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
+            (pkgs.makeFontsConf { fontDirectories = [ pkgs.noto-fonts-cjk-sans ]; });
+          METIS_NATIVE_VULKAN_ICD_DIR = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
+            "${pkgs.mesa}/share/vulkan/icd.d";
+          METIS_NATIVE_EGL_VENDOR_FILE = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
+            "${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json";
 
           shellHook = ''
             # Git hooks cannot travel with a clone (git's security model), so the
