@@ -35,14 +35,14 @@ tokio = { version = "1", default-features = false, features = [
   "net",
   "signal",
 ] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = [
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
   "connect",
 ] }
 thiserror = "2"
 # the `fancy` renderer may only appear in the final binary (top-level crate);
 # library crates should depend on plain miette instead
 miette = { version = "7", features = ["fancy"] }
-nix = { version = "0.31.4", default-features = false, features = ["signal"] }
+nix = { version = "0.32.0", default-features = false, features = ["signal"] }
 # process-wrap is pinned to the upstream commit containing the JobObject wait fix
 # until that fix reaches a crates.io release; remove the deny.toml source exception
 # together with this pin when switching back.
