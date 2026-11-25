@@ -15,12 +15,14 @@ use gpui_kit::{
     },
     div,
     prelude::*,
+    test::TestSupportExt as _,
 };
 
 use super::{
-    ConnectionState, EffectHandler, EffectResult, ExecutionState, FocusAnchor, MainView, ModelSpec,
-    QueueItemProjection, Region, SessionIntent, SessionKey, SessionPermissionPolicy,
-    SessionProjection, StatsInput, Workbench, logical_id, session_id,
+    ApprovalDecision, ApprovalState, ConnectionState, EffectHandler, EffectResult, ExecutionState,
+    FocusAnchor, MainView, ModelSpec, QueueItemProjection, Region, SessionIntent, SessionKey,
+    SessionPermissionPolicy, SessionProjection, StatsInput, ToolCallKey, ToolCallProjection,
+    Workbench, logical_id, session_id,
 };
 use crate::workbench::stats::{ContextSegmentKind, StatsProjection};
 
@@ -36,11 +38,13 @@ struct ComposerSession {
     queue_focus: FocusHandle,
     menu_focus: FocusHandle,
     stats_focus: BTreeMap<StatsDomain, FocusHandle>,
+    approval_focus: FocusHandle,
     model_id: Option<String>,
     effort: Option<String>,
     next_queue_id: u64,
     open_stats: BTreeSet<StatsDomain>,
     _input_subscription: Subscription,
+    _approval_focus_subscription: Subscription,
 }
 
 type OpenChangeHandler = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
@@ -48,8 +52,9 @@ type OpenChangeHandler = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
 pub(super) struct Composer {
     session: SessionKey,
     connection: ConnectionState,
+    generation: u64,
     execution: ExecutionState,
-    approval_pending: bool,
+    approval: Option<ToolCallProjection>,
     queue: Vec<QueueItemProjection>,
     permission: SessionPermissionPolicy,
     models: Vec<ModelSpec>,
@@ -72,8 +77,9 @@ impl Composer {
         let mut this = Self {
             session: projection.key.clone(),
             connection,
+            generation: projection.generation,
             execution: projection.execution,
-            approval_pending: projection.pending_approval().is_some(),
+            approval: projection.pending_approval().cloned(),
             queue: projection.queue.clone(),
             permission: projection.permission,
             models: projection.models.clone(),
@@ -96,8 +102,9 @@ impl Composer {
     ) {
         self.session = projection.key.clone();
         self.connection = connection;
+        self.generation = projection.generation;
         self.execution = projection.execution;
-        self.approval_pending = projection.pending_approval().is_some();
+        self.approval = projection.pending_approval().cloned();
         self.queue.clone_from(&projection.queue);
         self.permission = projection.permission;
         self.models.clone_from(&projection.models);
@@ -142,6 +149,32 @@ impl Composer {
             }
             InputEvent::PressEnter { .. } => {}
         });
+        let approval_focus = cx.focus_handle();
+        let approval_focus_subscription =
+            cx.on_focus_in(&approval_focus, window, |this, window, cx| {
+                let Some(state) = this.states.get(&this.session) else {
+                    return;
+                };
+                let focus = state.approval_focus.clone();
+                if !focus.contains_focused(window, cx) {
+                    return;
+                }
+                let Some(call) = this.approval.as_ref() else {
+                    return;
+                };
+                let anchor =
+                    FocusAnchor::new(MainView::Session(this.session.clone()), Region::Approval)
+                        .with_item(call.key.call_id.clone());
+                let parent = this.parent.clone();
+                window.defer(cx, move |window, cx| {
+                    if !focus.contains_focused(window, cx) {
+                        return;
+                    }
+                    if let Some(parent) = parent.upgrade() {
+                        parent.update(cx, |parent, cx| parent.note_focus(anchor, cx));
+                    }
+                });
+            });
         let initial_model = projection
             .initial_model
             .clone()
@@ -169,11 +202,13 @@ impl Composer {
                 queue_focus: cx.focus_handle(),
                 menu_focus: cx.focus_handle(),
                 stats_focus,
+                approval_focus,
                 model_id,
                 effort,
                 next_queue_id: 0,
                 open_stats: BTreeSet::new(),
                 _input_subscription: input_subscription,
+                _approval_focus_subscription: approval_focus_subscription,
             },
         );
     }
@@ -209,6 +244,14 @@ impl Composer {
             .get(&self.session)
             .expect("current Composer state")
             .queue_focus
+            .clone()
+    }
+
+    pub(super) fn approval_focus(&self, _: &App) -> FocusHandle {
+        self.states
+            .get(&self.session)
+            .expect("current Composer state")
+            .approval_focus
             .clone()
     }
 
@@ -276,6 +319,41 @@ impl Composer {
         }
     }
 
+    pub(super) fn decide(
+        &mut self,
+        call: ToolCallKey,
+        decision: ApprovalDecision,
+        expected_generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let is_current_pending = expected_generation == self.generation
+            && call.session == self.session
+            && self.approval.as_ref().is_some_and(|current| {
+                current.key == call && matches!(current.approval, ApprovalState::Pending)
+            });
+        if self.connection != ConnectionState::Online || !is_current_pending {
+            self.feedback = Some("Approval is stale or Offline; no decision was sent.".to_owned());
+            cx.notify();
+            return;
+        }
+        let result = (self.effects.borrow_mut())(SessionIntent::Approval {
+            call,
+            decision,
+            generation: self.generation,
+        });
+        self.feedback = Some(match result {
+            #[cfg(test)]
+            EffectResult::Recorded => {
+                "Approval intent recorded locally; Host acceptance and execution remain unknown."
+                    .to_owned()
+            }
+            EffectResult::Unavailable => {
+                "No Host connection is attached; the approval was not sent.".to_owned()
+            }
+        });
+        cx.notify();
+    }
+
     fn submit(&mut self, cx: &mut Context<Self>) {
         let selection = self.current_selection();
         let Some(state) = self.states.get_mut(&self.session) else {
@@ -285,7 +363,7 @@ impl Composer {
         let Some(action) = primary_action(
             self.connection,
             self.execution,
-            self.approval_pending,
+            self.approval.is_some(),
             selection.is_some(),
             &text,
         ) else {
@@ -353,11 +431,11 @@ impl Render for Composer {
         let input = state.input.clone();
         let draft = input.read(cx).value().to_string();
         let selection = self.current_selection();
-        let action_kind = action_kind(self.execution, self.approval_pending);
+        let action_kind = action_kind(self.execution, self.approval.is_some());
         let action = primary_action(
             self.connection,
             self.execution,
-            self.approval_pending,
+            self.approval.is_some(),
             selection.is_some(),
             &draft,
         );
@@ -381,6 +459,61 @@ impl Render for Composer {
         );
         let queue = self.queue.clone();
         let feedback = self.feedback.clone();
+        let approval_dock = self.approval.clone().map(|call| {
+            let call_id = call.key.call_id.clone();
+            let focus = state.approval_focus.clone();
+            let expected_generation = self.generation;
+            let can_approve = self.connection == ConnectionState::Online
+                && call.key.session == self.session
+                && matches!(call.approval, ApprovalState::Pending);
+            let allow_call = call.key.clone();
+            let reject_call = call.key.clone();
+            div()
+                .id(format!("approval-dock-{call_id}"))
+                .test_support()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .border_1()
+                .border_color(tokens.projected.border)
+                .track_focus(&focus)
+                .child(Label::new("Approval for this tool call"))
+                .child(Label::new(format!(
+                    "{}\nArguments\n{}",
+                    call.title, call.arguments
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new(format!("approval-allow-{call_id}"))
+                                .label("Allow once")
+                                .disabled(!can_approve)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.decide(
+                                        allow_call.clone(),
+                                        ApprovalDecision::AllowOnce,
+                                        expected_generation,
+                                        cx,
+                                    );
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("approval-reject-{call_id}"))
+                                .label("Reject")
+                                .disabled(!can_approve)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.decide(
+                                        reject_call.clone(),
+                                        ApprovalDecision::Reject,
+                                        expected_generation,
+                                        cx,
+                                    );
+                                })),
+                        ),
+                )
+        });
 
         div()
             .flex_col()
@@ -394,6 +527,7 @@ impl Render for Composer {
             .on_action(cx.listener(|this, action: &SelectEffort, _, cx| {
                 this.select_effort(&action.0, cx);
             }))
+            .children(approval_dock)
             .child(
                 div()
                     .flex()
@@ -422,7 +556,12 @@ impl Render for Composer {
                             .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
                     ),
             )
-            .child(Textarea::new(&input).w_full())
+            .child(
+                div()
+                    .id("composer-editor")
+                    .test_support()
+                    .child(Textarea::new(&input).w_full()),
+            )
             .children((!queue.is_empty()).then(|| {
                 div()
                     .id("session-queue")

@@ -116,6 +116,17 @@ fn pending_preview() -> WorkbenchProjection {
     projection
 }
 
+fn decided_preview() -> WorkbenchProjection {
+    let mut projection = pending_preview();
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut projection.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
+    call.execution = ExecutionState::Running;
+    call.output = Some("Host output arrives on the original call.".to_owned());
+    projection
+}
+
 fn open_preview(
     cx: &mut TestAppContext,
     projection: WorkbenchProjection,
@@ -359,6 +370,96 @@ fn session_send_and_queue_record_intents_without_clearing_draft_or_faking_host(
 }
 
 #[gpui_kit::test]
+fn user_messages_have_no_author_label_and_use_locatable_bubbles(cx: &mut TestAppContext) {
+    let long_message =
+        "请检查这个文件并保留现有行为，确保长中文内容能够在用户气泡中自然换行。".repeat(4);
+    let mut projection = preview();
+    let TimelineItem::User { text, .. } = &mut Rc::make_mut(&mut projection.sessions[0].items)[0]
+    else {
+        panic!("user fixture");
+    };
+    *text = long_message.clone();
+    let (handle, _view, _) = open_preview(cx, projection);
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    cx.update(|window, _| {
+        let bubble = window.find("user-message-user-1");
+        assert!(bubble.visible());
+        let bubble = bubble.bounds();
+        let row = window.find("user-message-row-user-1").bounds();
+        let timeline = window.find("session-timeline-region").bounds();
+        assert!(
+            bubble.size.width <= timeline.size.width * 0.8 + px(1.),
+            "bubble exceeds 80% of the Timeline: {bubble:?} vs {timeline:?}"
+        );
+        let bubble_right = bubble.origin.x + bubble.size.width;
+        let row_right = row.origin.x + row.size.width;
+        assert!(
+            bubble_right >= row_right - px(1.) && bubble_right <= row_right + px(1.),
+            "bubble is not aligned to the row's right edge: {bubble:?} vs {row:?}"
+        );
+        assert!(
+            bubble.size.height > px(50.),
+            "long Chinese text did not wrap: {bubble:?}"
+        );
+        let painted = test_support::texts(window);
+        assert!(
+            painted
+                .iter()
+                .any(|text| text.text().contains(long_message.as_str()))
+        );
+        assert!(!painted.iter().any(|text| text.text() == "You"));
+    });
+}
+
+#[gpui_kit::test]
+fn approval_dock_precedes_the_editor_and_stays_outside_the_tool_card(cx: &mut TestAppContext) {
+    let (handle, _view, _) = open_preview(cx, pending_preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    cx.update(|window, _| {
+        assert!(window.find("approval-allow-call-1").visible());
+        assert_ne!(window.find("approval-allow-call-1").disabled(), Some(true));
+        assert!(window.find("approval-reject-call-1").visible());
+        for button in ["approval-allow-call-1", "approval-reject-call-1"] {
+            assert!(
+                window
+                    .within("approval-dock-call-1")
+                    .try_find(button)
+                    .is_some(),
+                "{button} must be inside the decision dock"
+            );
+        }
+        let dock = window.find("approval-dock-call-1").bounds();
+        let editor = window.find("composer-editor").bounds();
+        assert!(
+            dock.origin.y + dock.size.height <= editor.origin.y + px(1.),
+            "decision dock must be above the editor: {dock:?} vs {editor:?}"
+        );
+        assert!(
+            window
+                .within("session-composer-region")
+                .try_find("approval-allow-call-1")
+                .is_some()
+        );
+        for button in ["approval-allow-call-1", "approval-reject-call-1"] {
+            assert!(window.within("tool-call-call-1").try_find(button).is_none());
+        }
+        let painted = test_support::texts(window);
+        for expected in [
+            "Approval for this tool call",
+            "read_file",
+            "/workspace/a/long/path.rs",
+        ] {
+            assert!(
+                painted.iter().any(|text| text.text().contains(expected)),
+                "missing approval content {expected:?}: {painted:?}"
+            );
+        }
+    });
+}
+
+#[gpui_kit::test]
 fn session_approval_intent_updates_the_same_tool_card_without_an_execution_card(
     cx: &mut TestAppContext,
 ) {
@@ -372,10 +473,7 @@ fn session_approval_intent_updates_the_same_tool_card_without_an_execution_card(
         scroller(&view, &cx).read_with(&cx, |state, _| state.item_count()),
         before
     );
-    cx.update(|window, cx| {
-        assert!(window.find("approval-allow-call-1").visible());
-        window.click("approval-allow-call-1", cx);
-    });
+    cx.update(|window, cx| window.click("approval-allow-call-1", cx));
     settle(&mut cx);
     assert_eq!(
         intents.borrow().as_slice(),
@@ -397,14 +495,26 @@ fn session_approval_intent_updates_the_same_tool_card_without_an_execution_card(
         "an intent must not become a local approval fact"
     );
 
-    let mut decided = pending_preview();
-    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut decided.sessions[0].items)[2] else {
+    let mut submitting = pending_preview();
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut submitting.sessions[0].items)[2] else {
         panic!("tool fixture");
     };
-    call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
-    call.execution = ExecutionState::Running;
-    call.output = Some("Host output arrives on the original call.".to_owned());
-    replace(&mut cx, &view, decided);
+    call.approval = ApprovalState::Submitting;
+    replace(&mut cx, &view, submitting);
+    cx.update(|window, _| {
+        assert_eq!(window.find("approval-allow-call-1").disabled(), Some(true));
+        assert_eq!(window.find("approval-reject-call-1").disabled(), Some(true));
+    });
+
+    let mut offline = pending_preview();
+    offline.connection = ConnectionState::Offline;
+    replace(&mut cx, &view, offline);
+    cx.update(|window, _| {
+        assert_eq!(window.find("approval-allow-call-1").disabled(), Some(true));
+        assert_eq!(window.find("approval-reject-call-1").disabled(), Some(true));
+    });
+
+    replace(&mut cx, &view, decided_preview());
     assert_eq!(
         view.read_with(&cx, |view, _| view
             .current_projection()
@@ -425,6 +535,83 @@ fn session_approval_intent_updates_the_same_tool_card_without_an_execution_card(
             text.text()
                 .contains("Host output arrives on the original call.")
         }));
+    });
+}
+
+#[gpui_kit::test]
+fn decided_approval_restores_the_original_tool_summary_focus(cx: &mut TestAppContext) {
+    let (handle, view, _) = open_preview(cx, pending_preview());
+    let mut cx = visual(handle, cx);
+    cx.update(|window, _| window.activate_window());
+    settle(&mut cx);
+    cx.update(|window, _| {
+        assert_eq!(window.find("approval-dock-call-1").focused(), Some(true));
+    });
+
+    replace(&mut cx, &view, decided_preview());
+    cx.update(|window, _| {
+        assert_eq!(window.find("tool-call-1-summary").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn decided_approval_restores_tool_summary_from_decision_button_focus(cx: &mut TestAppContext) {
+    let (handle, view, _) = open_preview(cx, pending_preview());
+    let mut cx = visual(handle, cx);
+    cx.update(|window, _| window.activate_window());
+    settle(&mut cx);
+    set_draft(&mut cx, &view, "keep this draft", 2..7);
+    cx.update(|window, cx| {
+        for _ in 0..8 {
+            window.press("shift-tab", cx);
+            if window.find("approval-allow-call-1").focused() == Some(true)
+                || window.find("approval-reject-call-1").focused() == Some(true)
+            {
+                break;
+            }
+        }
+        assert!(
+            window.find("approval-allow-call-1").focused() == Some(true)
+                || window.find("approval-reject-call-1").focused() == Some(true),
+            "keyboard focus did not reach a decision button"
+        );
+    });
+    settle(&mut cx);
+    let saved = view.read_with(&cx, |view, _| {
+        view.controller.as_ref().unwrap().navigation.focus().clone()
+    });
+    assert_eq!(saved.region, Region::Approval, "saved focus: {saved:?}");
+
+    replace(&mut cx, &view, decided_preview());
+    cx.update(|window, _| {
+        assert_eq!(window.find("tool-call-1-summary").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn decided_approval_preserves_a_focused_draft_and_its_selection(cx: &mut TestAppContext) {
+    let (handle, view, _) = open_preview(cx, pending_preview());
+    let mut cx = visual(handle, cx);
+    cx.update(|window, _| window.activate_window());
+    settle(&mut cx);
+    set_draft(&mut cx, &view, "keep this draft", 2..7);
+    let input = input(&view, &cx);
+    let saved = view.read_with(&cx, |view, _| {
+        view.controller.as_ref().unwrap().navigation.focus().clone()
+    });
+    assert_eq!(saved.region, Region::Composer, "saved focus: {saved:?}");
+
+    replace(&mut cx, &view, decided_preview());
+    assert_eq!(
+        input.read_with(&cx, |input, _| input.value()),
+        "keep this draft"
+    );
+    assert_eq!(
+        input.read_with(&cx, |input, _| input.selected_range()),
+        2..7
+    );
+    cx.update(|window, cx| {
+        assert!(input.read(cx).focus_handle(cx).is_focused(window));
     });
 }
 

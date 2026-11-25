@@ -101,9 +101,9 @@ fn deleted_session_falls_back_prunes_native_state_and_cannot_emit_old_effects(
 fn stale_or_deleted_approval_closure_is_revalidated_before_recording(cx: &mut TestAppContext) {
     let (handle, view, intents) = open_preview(cx, pending_preview());
     let mut cx = visual(handle, cx);
-    let timeline = view
-        .read_with(&cx, |view, _| view.timeline.clone())
-        .expect("Timeline");
+    let composer = view
+        .read_with(&cx, |view, _| view.composer.clone())
+        .expect("Composer");
     let call = ToolCallKey::new(session("one"), "call-1");
 
     let mut stale = pending_preview();
@@ -113,8 +113,8 @@ fn stale_or_deleted_approval_closure_is_revalidated_before_recording(cx: &mut Te
     };
     tool.approval = ApprovalState::Stale;
     replace(&mut cx, &view, stale);
-    timeline.update(&mut cx, |timeline, cx| {
-        timeline.decide(call.clone(), ApprovalDecision::AllowOnce, cx);
+    composer.update(&mut cx, |composer, cx| {
+        composer.decide(call.clone(), ApprovalDecision::AllowOnce, 2, cx);
     });
     assert!(
         intents.borrow().is_empty(),
@@ -125,8 +125,8 @@ fn stale_or_deleted_approval_closure_is_revalidated_before_recording(cx: &mut Te
     deleted.sessions[0].generation = 3;
     Rc::make_mut(&mut deleted.sessions[0].items).remove(2);
     replace(&mut cx, &view, deleted);
-    timeline.update(&mut cx, |timeline, cx| {
-        timeline.decide(call.clone(), ApprovalDecision::AllowOnce, cx);
+    composer.update(&mut cx, |composer, cx| {
+        composer.decide(call.clone(), ApprovalDecision::AllowOnce, 3, cx);
     });
     assert!(
         intents.borrow().is_empty(),
@@ -137,8 +137,8 @@ fn stale_or_deleted_approval_closure_is_revalidated_before_recording(cx: &mut Te
     offline.connection = ConnectionState::Offline;
     offline.sessions[0].generation = 4;
     replace(&mut cx, &view, offline);
-    timeline.update(&mut cx, |timeline, cx| {
-        timeline.decide(call.clone(), ApprovalDecision::AllowOnce, cx);
+    composer.update(&mut cx, |composer, cx| {
+        composer.decide(call.clone(), ApprovalDecision::AllowOnce, 4, cx);
     });
     assert!(
         intents.borrow().is_empty(),
@@ -148,8 +148,8 @@ fn stale_or_deleted_approval_closure_is_revalidated_before_recording(cx: &mut Te
     let mut current = pending_preview();
     current.sessions[0].generation = 5;
     replace(&mut cx, &view, current);
-    timeline.update(&mut cx, |timeline, cx| {
-        timeline.decide(call.clone(), ApprovalDecision::AllowOnce, cx);
+    composer.update(&mut cx, |composer, cx| {
+        composer.decide(call.clone(), ApprovalDecision::AllowOnce, 5, cx);
     });
     assert_eq!(
         intents.borrow().as_slice(),
@@ -158,6 +158,69 @@ fn stale_or_deleted_approval_closure_is_revalidated_before_recording(cx: &mut Te
             decision: ApprovalDecision::AllowOnce,
             generation: 5,
         }]
+    );
+}
+
+#[gpui_kit::test]
+fn approval_decision_revalidates_generation_call_identity_and_submission(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, pending_preview());
+    let mut cx = visual(handle, cx);
+    let composer = view
+        .read_with(&cx, |view, _| view.composer.clone())
+        .expect("Composer");
+    let call = ToolCallKey::new(session("one"), "call-1");
+    let mut generation_two = pending_preview();
+    generation_two.sessions[0].generation = 2;
+    replace(&mut cx, &view, generation_two.clone());
+
+    composer.update(&mut cx, |composer, cx| {
+        composer.decide(call.clone(), ApprovalDecision::AllowOnce, 1, cx);
+    });
+    assert!(
+        intents.borrow().is_empty(),
+        "a gen1 closure must not authorize the same call in gen2"
+    );
+
+    composer.update(&mut cx, |composer, cx| {
+        composer.decide(call.clone(), ApprovalDecision::AllowOnce, 2, cx);
+    });
+    assert_eq!(
+        intents.borrow().as_slice(),
+        &[SessionIntent::Approval {
+            call: call.clone(),
+            decision: ApprovalDecision::AllowOnce,
+            generation: 2,
+        }]
+    );
+
+    let mut submitting = generation_two.clone();
+    let TimelineItem::Tool(tool) = &mut Rc::make_mut(&mut submitting.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    tool.approval = ApprovalState::Submitting;
+    replace(&mut cx, &view, submitting);
+    composer.update(&mut cx, |composer, cx| {
+        composer.decide(call.clone(), ApprovalDecision::AllowOnce, 2, cx);
+    });
+    assert_eq!(
+        intents.borrow().len(),
+        1,
+        "Submitting must not grow intents from a direct old decision"
+    );
+
+    let mut other_call = generation_two;
+    let TimelineItem::Tool(tool) = &mut Rc::make_mut(&mut other_call.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    tool.key = ToolCallKey::new(session("one"), "call-2");
+    replace(&mut cx, &view, other_call);
+    composer.update(&mut cx, |composer, cx| {
+        composer.decide(call.clone(), ApprovalDecision::AllowOnce, 2, cx);
+    });
+    assert_eq!(
+        intents.borrow().len(),
+        1,
+        "an old key must not decide a different pending call"
     );
 }
 

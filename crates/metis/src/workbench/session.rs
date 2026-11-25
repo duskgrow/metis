@@ -12,6 +12,7 @@ use gpui_kit::{
     div,
     prelude::*,
     px,
+    test::TestSupportExt as _,
 };
 
 use super::{
@@ -222,10 +223,18 @@ pub(super) struct MainViewController {
 
 impl MainViewController {
     fn new(session: &SessionProjection, snapshot: NavigationSnapshot) -> Self {
-        let navigation = NavigationState::new(session.key.clone());
+        let mut navigation = NavigationState::new(session.key.clone());
         let topology = Self::topology_for(navigation.current_view(), Some(session));
         let mut focus = FocusReducer::new(topology.clone());
-        let pending_focus = Some(focus.restore(topology, navigation.focus().clone()));
+        let initial_anchor = session.pending_approval().map_or_else(
+            || navigation.focus().clone(),
+            |call| {
+                FocusAnchor::new(MainView::Session(session.key.clone()), Region::Approval)
+                    .with_item(call.key.call_id.clone())
+            },
+        );
+        let pending_focus = Some(focus.restore(topology, initial_anchor.clone()));
+        navigation.set_focus_anchor(initial_anchor);
         Self {
             navigation,
             snapshot,
@@ -386,17 +395,7 @@ impl Workbench {
             SessionNavigation::new(&projection, first.map(|session| &session.key), parent, cx)
         });
         let parent = cx.weak_entity();
-        let timeline = first.map(|session| {
-            cx.new(|cx| {
-                SessionTimeline::new(
-                    session,
-                    projection.connection,
-                    parent,
-                    Rc::clone(effects),
-                    cx,
-                )
-            })
-        });
+        let timeline = first.map(|session| cx.new(|cx| SessionTimeline::new(session, parent, cx)));
         let parent = cx.weak_entity();
         let composer = first.map(|session| {
             cx.new(|cx| {
@@ -460,7 +459,7 @@ impl Workbench {
         }
         if let Some(timeline) = &self.timeline {
             timeline.update(cx, |timeline, cx| {
-                timeline.set_session(&projection, self.projection.connection, cx);
+                timeline.set_session(&projection, cx);
             });
         }
         if let Some(composer) = &self.composer {
@@ -482,7 +481,7 @@ impl Workbench {
         if let Some(projection) = self.current_projection().cloned() {
             if let Some(timeline) = &self.timeline {
                 timeline.update(cx, |timeline, cx| {
-                    timeline.set_session(&projection, self.projection.connection, cx);
+                    timeline.set_session(&projection, cx);
                 });
             }
             if let Some(composer) = &self.composer {
@@ -547,10 +546,8 @@ impl Workbench {
                 let connection = self.projection.connection;
                 if self.timeline.is_none() {
                     let parent = cx.weak_entity();
-                    let effects = Rc::clone(&self.effects);
-                    self.timeline = Some(cx.new(|cx| {
-                        SessionTimeline::new(&projection, connection, parent, effects, cx)
-                    }));
+                    self.timeline =
+                        Some(cx.new(|cx| SessionTimeline::new(&projection, parent, cx)));
                 }
                 if self.composer.is_none() {
                     let parent = cx.weak_entity();
@@ -561,7 +558,7 @@ impl Workbench {
                 }
                 if let Some(timeline) = &self.timeline {
                     timeline.update(cx, |timeline, cx| {
-                        timeline.set_session(&projection, connection, cx);
+                        timeline.set_session(&projection, cx);
                         timeline.prune(&live);
                     });
                 }
@@ -634,12 +631,10 @@ impl Workbench {
                     .timeline_focus(target.anchor.item_id.as_deref(), cx)
                     .map(ResolvedFocus::Handle)
             }),
-            Region::Approval => self.timeline.as_ref().and_then(|timeline| {
-                timeline
-                    .read(cx)
-                    .approval_focus(target.anchor.item_id.as_deref(), cx)
-                    .map(ResolvedFocus::Handle)
-            }),
+            Region::Approval => self
+                .composer
+                .as_ref()
+                .map(|composer| ResolvedFocus::Handle(composer.read(cx).approval_focus(cx))),
             Region::Queue => self
                 .composer
                 .as_ref()
@@ -751,6 +746,7 @@ impl Render for Workbench {
                                 .children(timeline.map(|timeline| {
                                     div()
                                         .id("session-timeline-region")
+                                        .test_support()
                                         .absolute()
                                         .left_0()
                                         .right_0()
