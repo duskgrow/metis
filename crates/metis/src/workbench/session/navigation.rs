@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gpui_kit::{
-    App, Context, Entity, Render, Subscription, WeakEntity, Window,
+    App, Context, Entity, FocusHandle, Render, Subscription, WeakEntity, Window,
+    base::Disableable as _,
     component::{
+        button::{Button, ButtonVariants as _},
         list::ListItem,
+        menu::DropdownMenu as _,
         tree::{Tree, TreeEvent, TreeItem, TreeState},
     },
     div,
@@ -20,6 +23,10 @@ enum ExpansionTarget {
     Subagent(SessionKey),
 }
 
+#[derive(Clone, Debug, PartialEq, gpui_kit::Action)]
+#[action(namespace = metis_workbench, no_json)]
+struct SelectHost(Option<String>);
+
 pub(super) struct SessionNavigation {
     tree: Entity<TreeState>,
     targets: BTreeMap<String, SessionKey>,
@@ -27,8 +34,12 @@ pub(super) struct SessionNavigation {
     expanded_projects: BTreeSet<ProjectKey>,
     expanded_worktrees: BTreeSet<WorktreeKey>,
     expanded_subagents: BTreeSet<SessionKey>,
+    hosts: BTreeSet<String>,
+    host_filter: Option<String>,
+    filter_focus: FocusHandle,
     parent: WeakEntity<Workbench>,
     _tree_subscription: Subscription,
+    _filter_focus_subscription: Subscription,
 }
 
 impl SessionNavigation {
@@ -36,6 +47,7 @@ impl SessionNavigation {
         projection: &WorkbenchProjection,
         selected: Option<&SessionKey>,
         parent: WeakEntity<Workbench>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut expanded_projects = BTreeSet::new();
@@ -46,6 +58,7 @@ impl SessionNavigation {
         }
         let (items, targets, expansion_targets) = build_items(
             projection,
+            None,
             &expanded_projects,
             &expanded_worktrees,
             &expanded_subagents,
@@ -89,6 +102,20 @@ impl SessionNavigation {
                 }
             }
         });
+        let filter_focus = cx.focus_handle();
+        let filter_focus_subscription =
+            cx.on_focus_in(&filter_focus, window, |this, window, cx| {
+                let focus = this.filter_focus.clone();
+                let parent = this.parent.clone();
+                window.defer(cx, move |window, cx| {
+                    if !focus.contains_focused(window, cx) {
+                        return;
+                    }
+                    if let Some(owner) = parent.upgrade() {
+                        owner.update(cx, |owner, cx| owner.host_filter_focused(cx));
+                    }
+                });
+            });
         Self {
             tree,
             targets,
@@ -96,13 +123,44 @@ impl SessionNavigation {
             expanded_projects,
             expanded_worktrees,
             expanded_subagents,
+            hosts: collect_hosts(projection),
+            host_filter: None,
+            filter_focus,
             parent,
             _tree_subscription: tree_subscription,
+            _filter_focus_subscription: filter_focus_subscription,
         }
     }
 
     pub(super) fn tree_state(&self, _: &App) -> Entity<TreeState> {
         self.tree.clone()
+    }
+
+    pub(super) fn filter_focus(&self) -> FocusHandle {
+        self.filter_focus.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn hosts_changed(&self, projection: &WorkbenchProjection) -> bool {
+        self.hosts != collect_hosts(projection)
+    }
+
+    fn select_host(&mut self, host: Option<String>, cx: &mut Context<Self>) {
+        if self.host_filter == host {
+            return;
+        }
+        self.host_filter = host;
+        let owner = self.parent.upgrade().expect("navigation owner is alive");
+        let (projection, selected) = {
+            let owner = owner.read(cx);
+            (
+                owner.projection.clone(),
+                owner
+                    .current_projection()
+                    .map(|session| session.key.clone()),
+            )
+        };
+        self.rebuild(&projection, selected.as_ref(), false, cx);
     }
 
     pub(super) fn select_session(
@@ -165,8 +223,17 @@ impl SessionNavigation {
         reveal_selected: bool,
         cx: &mut Context<Self>,
     ) {
+        self.hosts = collect_hosts(projection);
+        if self
+            .host_filter
+            .as_ref()
+            .is_some_and(|host| !self.hosts.contains(host))
+        {
+            self.host_filter = None;
+        }
         let (items, targets, expansion_targets) = build_items(
             projection,
+            self.host_filter.as_deref(),
             &self.expanded_projects,
             &self.expanded_worktrees,
             &self.expanded_subagents,
@@ -186,6 +253,7 @@ impl SessionNavigation {
                 tree.set_selected_index(None, cx);
             }
         });
+        cx.notify();
     }
 
     fn tokens(&self, cx: &App) -> super::ResolvedTokens {
@@ -202,12 +270,13 @@ impl SessionNavigation {
 }
 
 impl Render for SessionNavigation {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tree = self.tree.clone();
         let targets = self.targets.clone();
         let tokens = self.tokens(cx);
         let empty = targets.is_empty();
         let owner = self.parent.upgrade().expect("navigation owner is alive");
+        let filter_owner = owner.clone();
         let tree_element = Tree::new(&tree, move |_, entry, _, window, _| {
             let id = entry.item().id.clone();
             let label = entry.item().label.clone();
@@ -222,20 +291,47 @@ impl Render for SessionNavigation {
                 });
             item.on_click(move |event, window, cx| listener(event, window, cx))
         });
+        let filter_listener =
+            window.listener_for(&filter_owner, |this, open: &bool, window, cx| {
+                this.host_filter_changed(*open, window, cx);
+            });
+        let hosts = self.hosts.clone();
+        let host_filter = self.host_filter.clone();
+        let action_context = self.filter_focus.clone();
+        let filter = Button::new("host-filter")
+            .ghost()
+            .label(host_filter.as_deref().unwrap_or("All Hosts"))
+            .disabled(hosts.is_empty())
+            .track_focus(&self.filter_focus)
+            .dropdown_menu(move |menu, _, _| {
+                let menu = menu.action_context(action_context.clone()).menu_with_check(
+                    "All Hosts",
+                    host_filter.is_none(),
+                    Box::new(SelectHost(None)),
+                );
+                hosts.iter().fold(menu, |menu, host| {
+                    menu.menu_with_check(
+                        host.clone(),
+                        host_filter.as_ref() == Some(host),
+                        Box::new(SelectHost(Some(host.clone()))),
+                    )
+                })
+            })
+            .on_open_change(move |open, window, cx| filter_listener(open, window, cx));
         div()
             .flex_col()
             .size_full()
             .p(tokens.metis.density_gap)
-            .child(
+            .on_action(cx.listener(|this, action: &SelectHost, _, cx| {
+                this.select_host(action.0.clone(), cx);
+            }))
+            .child(filter)
+            .children(empty.then(|| {
                 div()
                     .text_color(tokens.metis.foreground_secondary)
                     .text_size(tokens.metis.metadata_font_size)
-                    .child(if empty {
-                        "Offline · no Host or Sessions"
-                    } else {
-                        "Host / Project / Worktree / Session"
-                    }),
-            )
+                    .child("Offline · no Host or Sessions")
+            }))
             .child(div().flex_1().min_h_0().child(tree_element))
     }
 }
@@ -249,8 +345,17 @@ fn reveal_session(
     expanded_worktrees.insert(selected.worktree.clone());
 }
 
+fn collect_hosts(projection: &WorkbenchProjection) -> BTreeSet<String> {
+    projection
+        .sessions
+        .iter()
+        .map(|session| session.key.worktree.project.host_id.clone())
+        .collect()
+}
+
 fn build_items(
     projection: &WorkbenchProjection,
+    host_filter: Option<&str>,
     expanded_projects: &BTreeSet<ProjectKey>,
     expanded_worktrees: &BTreeSet<WorktreeKey>,
     expanded_subagents: &BTreeSet<SessionKey>,
@@ -277,6 +382,7 @@ fn build_items(
     let mut roots = Vec::new();
     let mut targets = BTreeMap::new();
     let mut expansion_targets = BTreeMap::new();
+    groups.retain(|host, _| host_filter.is_none_or(|filter| filter == host.as_str()));
     for (host, projects) in groups {
         let mut project_items = Vec::new();
         for (project, worktrees) in projects {
@@ -512,7 +618,7 @@ mod tests {
         );
 
         let (roots, targets, expansion_targets) =
-            build_items(&projection, &projects, &worktrees, &BTreeSet::new());
+            build_items(&projection, None, &projects, &worktrees, &BTreeSet::new());
         assert_eq!(roots.len(), 2, "the fixture has two distinct Hosts");
         assert_eq!(targets.len(), 6, "subagents are not domain Sessions");
 
@@ -587,7 +693,7 @@ mod tests {
         );
 
         projects.remove(&project_key("h-local", "p-local-atlas"));
-        let (roots, _, _) = build_items(&projection, &projects, &worktrees, &subagents);
+        let (roots, _, _) = build_items(&projection, None, &projects, &worktrees, &subagents);
         let atlas = project(&roots, "h-local", "p-local-atlas");
         assert!(!atlas.is_expanded());
         let main = child(atlas, &worktree_id("h-local", "p-local-atlas", "w-atlas"));

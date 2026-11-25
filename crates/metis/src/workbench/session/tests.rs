@@ -101,8 +101,12 @@ fn session_projection(id: &str) -> SessionProjection {
 }
 
 fn rehome(session: &mut SessionProjection, project: &str, worktree: &str) {
+    rehome_on_host(session, "host", project, worktree);
+}
+
+fn rehome_on_host(session: &mut SessionProjection, host: &str, project: &str, worktree: &str) {
     let key = SessionKey::new(
-        WorktreeKey::new(ProjectKey::new("host", project), worktree),
+        WorktreeKey::new(ProjectKey::new(host, project), worktree),
         session.key.session_id.clone(),
     );
     session.key = key.clone();
@@ -209,6 +213,40 @@ fn settle(cx: &mut VisualTestContext) {
         window.render_frame(cx);
     });
     cx.run_until_parked();
+}
+
+fn confirm_tree_item(
+    cx: &mut VisualTestContext,
+    tree: &Entity<gpui_kit::component::tree::TreeState>,
+    item: &TreeItem,
+) {
+    cx.update(|window, cx| {
+        tree.update(cx, |tree, cx| {
+            tree.set_selected_item(Some(item), cx);
+            tree.focus(window, cx);
+        });
+        window.dispatch_action(
+            Box::new(gpui_kit::base::actions::Confirm { secondary: false }),
+            cx,
+        );
+    });
+    settle(cx);
+}
+
+fn choose_host_filter(cx: &mut VisualTestContext, view: &Entity<Workbench>, index: usize) {
+    let filter = view.read_with(cx, |view, cx| view.navigation.read(cx).filter_focus());
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.focus(&filter, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+        let mut menu = window.within("popup-menu");
+        for _ in 0..=index {
+            menu.press("down", cx);
+        }
+        window.press("enter", cx);
+    });
+    settle(cx);
 }
 
 fn input<C: gpui_kit::AppContext>(
@@ -1378,6 +1416,307 @@ fn native_navigation_reveal_and_refresh_preserve_manual_collapse(cx: &mut TestAp
             )
             .expect("atlas entry");
         assert!(!atlas.is_expanded());
+    });
+}
+
+fn host_filter_projection() -> WorkbenchProjection {
+    let mut projection = preview();
+    let mut remote = session_projection("remote");
+    rehome_on_host(&mut remote, "build", "metis-host", "release");
+    projection.sessions.push(remote);
+    projection
+}
+
+#[gpui_kit::test]
+fn host_filter_preserves_current_session_and_visible_expansion_state(cx: &mut TestAppContext) {
+    let local_session_id = session_id(&session("one"));
+    let local_item = TreeItem::new(local_session_id.clone(), "");
+    let remote_project = TreeItem::new(logical_id("project", &["build", "metis-host"]), "");
+    let (handle, view, _) = open_preview(cx, host_filter_projection());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    let filter = view.read_with(&cx, |view, cx| view.navigation.read(cx).filter_focus());
+    let tree = view.read_with(&cx, |view, cx| view.navigation.read(cx).tree_state(cx));
+
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.focus(&filter, cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("host-filter").label(), Some("All Hosts"));
+        window.press("enter", cx);
+        let mut menu = window.within("popup-menu");
+        assert_eq!(menu.find(0usize).checked(), Some(true));
+        assert_eq!(menu.find(1usize).checked(), Some(false));
+        menu.press("down", cx);
+        menu.press("down", cx);
+        window.press("enter", cx);
+    });
+    settle(&mut cx);
+
+    cx.update(|window, _| {
+        assert_eq!(window.find("host-filter").label(), Some("build"));
+        assert_eq!(window.find("host-filter").focused(), Some(true));
+    });
+    tree.read_with(&cx, |tree, _| {
+        assert!(tree.index_of(&local_item.id).is_none());
+        assert!(tree.index_of(&remote_project.id).is_some());
+        assert!(tree.selected_item().is_none());
+    });
+    assert_eq!(
+        view.read_with(&cx, |view, _| {
+            view.current_projection().map(|session| session.key.clone())
+        }),
+        Some(session("one")),
+        "filtering navigation must not switch the main Session"
+    );
+
+    cx.update(|window, cx| {
+        window.press("enter", cx);
+        let mut menu = window.within("popup-menu");
+        assert_eq!(menu.find(0usize).checked(), Some(false));
+        assert_eq!(menu.find(1usize).checked(), Some(true));
+        menu.press("down", cx);
+        window.press("enter", cx);
+    });
+    settle(&mut cx);
+
+    cx.update(|window, _| {
+        assert_eq!(window.find("host-filter").label(), Some("All Hosts"));
+        assert_eq!(window.find("host-filter").focused(), Some(true));
+    });
+    tree.read_with(&cx, |tree, _| {
+        assert!(
+            tree.index_of(&local_item.id).is_some(),
+            "the original Project stays expanded while its Host is filtered out"
+        );
+        assert!(tree.index_of(&remote_project.id).is_some());
+        assert_eq!(
+            tree.selected_item().map(|item| item.id.to_string()),
+            Some(local_session_id)
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn host_filter_focus_survives_refresh_and_close_clears_overlay(cx: &mut TestAppContext) {
+    let projection = host_filter_projection();
+    let (handle, view, _) = open_preview(cx, projection.clone());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    let filter = view.read_with(&cx, |view, cx| view.navigation.read(cx).filter_focus());
+
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.focus(&filter, cx);
+        window.render_frame(cx);
+    });
+    settle(&mut cx);
+    assert_eq!(
+        view.read_with(&cx, |view, _| {
+            view.controller
+                .as_ref()
+                .expect("controller")
+                .focus
+                .current()
+                .anchor
+                .item_id
+        }),
+        Some("host-filter".to_owned()),
+        "native focus must first be recorded in the logical focus model"
+    );
+    replace(&mut cx, &view, projection.clone());
+    settle(&mut cx);
+    cx.update(|window, cx| {
+        assert_eq!(
+            window.find("host-filter").focused(),
+            Some(true),
+            "focus alone must survive a background projection refresh"
+        );
+        window.press("enter", cx);
+    });
+
+    replace(&mut cx, &view, projection);
+    settle(&mut cx);
+    cx.update(|window, cx| {
+        assert!(
+            window.try_find("popup-menu").is_some(),
+            "a background refresh must not dismiss the open Host menu"
+        );
+        assert_ne!(
+            window.find("host-filter").focused(),
+            Some(true),
+            "a background refresh must not move focus behind the open menu"
+        );
+        window.press("escape", cx);
+    });
+    settle(&mut cx);
+    assert_eq!(
+        view.read_with(&cx, |view, _| {
+            view.controller
+                .as_ref()
+                .expect("controller")
+                .focus
+                .overlay_depth()
+        }),
+        0,
+        "closing the native menu must also close its logical overlay"
+    );
+    cx.update(|window, _| {
+        assert_eq!(window.find("host-filter").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn host_filter_closes_stale_menu_when_hosts_change(cx: &mut TestAppContext) {
+    let mut projection = host_filter_projection();
+    let (handle, view, _) = open_preview(cx, projection.clone());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    choose_host_filter(&mut cx, &view, 1);
+    cx.update(|window, cx| window.press("enter", cx));
+    settle(&mut cx);
+
+    projection
+        .sessions
+        .retain(|session| session.key.worktree.project.host_id == "host");
+    replace(&mut cx, &view, projection);
+    settle(&mut cx);
+    cx.update(|window, cx| {
+        assert!(
+            window.try_find("popup-menu").is_none(),
+            "a changed Host set must dismiss the stale menu"
+        );
+        assert_eq!(window.find("host-filter").label(), Some("All Hosts"));
+        assert_eq!(window.find("host-filter").focused(), Some(true));
+        window.press("enter", cx);
+        let menu = window.within("popup-menu");
+        assert_eq!(menu.find(0usize).label(), Some("All Hosts"));
+        assert_eq!(menu.find(0usize).checked(), Some(true));
+        assert_eq!(menu.find(1usize).label(), Some("host"));
+        assert_eq!(menu.find(1usize).checked(), Some(false));
+        window.press("escape", cx);
+    });
+    settle(&mut cx);
+    assert_eq!(
+        view.read_with(&cx, |view, _| {
+            view.controller
+                .as_ref()
+                .expect("controller")
+                .focus
+                .overlay_depth()
+        }),
+        0,
+        "the refreshed menu must still close its logical overlay"
+    );
+}
+
+#[gpui_kit::test]
+fn host_filter_closes_before_empty_state_takes_focus(cx: &mut TestAppContext) {
+    let (handle, view, _) = open_preview(cx, host_filter_projection());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    let filter = view.read_with(&cx, |view, cx| view.navigation.read(cx).filter_focus());
+    let header_focus = view.read_with(&cx, |view, _| view.header_focus.clone());
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.focus(&filter, cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    });
+    settle(&mut cx);
+
+    replace(&mut cx, &view, WorkbenchProjection::default());
+    settle(&mut cx);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("popup-menu").is_none(),
+            "the stale menu must close before the empty state takes focus"
+        );
+        assert!(header_focus.is_focused(window));
+        assert_eq!(window.find("host-filter").label(), Some("All Hosts"));
+    });
+    assert!(
+        view.read_with(&cx, |view, _| view.controller.is_none()),
+        "the empty projection must not retain a Session controller"
+    );
+}
+
+#[gpui_kit::test]
+fn host_filter_round_trip_preserves_nested_expansion_state(cx: &mut TestAppContext) {
+    let mut projection = preview();
+    let mut deployment = session_projection("deployment");
+    rehome(&mut deployment, "atlas", "main");
+    deployment.subagents.push(SubagentProjection {
+        key: SubagentKey::new(deployment.key.clone(), "child"),
+        title: "Read-only child".to_owned(),
+        continuable: false,
+    });
+    let deployment_key = deployment.key.clone();
+    let deployment_id = session_id(&deployment_key);
+    let child_id = logical_id("subagent", &[deployment_id.as_str(), "child"]);
+    let mut review = session_projection("review");
+    rehome(&mut review, "atlas", "review");
+    let review_key = review.key.clone();
+    let review_id = session_id(&review_key);
+    let mut remote = session_projection("remote");
+    rehome_on_host(&mut remote, "build", "metis-host", "release");
+    projection.sessions.extend([deployment, review, remote]);
+
+    let (handle, view, _) = open_preview(cx, projection);
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    let tree = view.read_with(&cx, |view, cx| view.navigation.read(cx).tree_state(cx));
+    let deployment_item = TreeItem::new(deployment_id.clone(), "");
+    let review_item = TreeItem::new(review_id.clone(), "");
+    let child_item = TreeItem::new(child_id.clone(), "");
+    let atlas_item = TreeItem::new(logical_id("project", &["host", "atlas"]), "");
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_session(deployment_key, window, cx);
+        });
+    });
+    settle(&mut cx);
+    confirm_tree_item(&mut cx, &tree, &deployment_item);
+    tree.read_with(&cx, |tree, _| {
+        assert!(tree.index_of(&child_item.id).is_some());
+    });
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_session(review_key, window, cx);
+        });
+    });
+    settle(&mut cx);
+    confirm_tree_item(&mut cx, &tree, &atlas_item);
+    tree.read_with(&cx, |tree, _| {
+        assert!(tree.index_of(&review_item.id).is_none());
+    });
+
+    choose_host_filter(&mut cx, &view, 1);
+    choose_host_filter(&mut cx, &view, 0);
+    tree.read_with(&cx, |tree, _| {
+        let atlas = tree
+            .entry(tree.index_of(&atlas_item.id).expect("atlas Project"))
+            .expect("atlas entry");
+        assert!(!atlas.is_expanded(), "filtering must not reopen Projects");
+        assert!(tree.index_of(&review_item.id).is_none());
+    });
+
+    confirm_tree_item(&mut cx, &tree, &atlas_item);
+    tree.read_with(&cx, |tree, _| {
+        assert!(
+            tree.index_of(&review_item.id).is_some(),
+            "the second Worktree must stay expanded"
+        );
+        assert!(
+            tree.index_of(&deployment_item.id).is_some(),
+            "the first Worktree must stay expanded"
+        );
+        assert!(
+            tree.index_of(&child_item.id).is_some(),
+            "Subagent expansion must survive the Host filter round-trip"
+        );
     });
 }
 

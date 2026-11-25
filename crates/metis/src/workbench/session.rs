@@ -284,10 +284,15 @@ impl MainViewController {
             .current_session()
             .and_then(|key| projection.session(key));
         let topology = Self::topology_for(self.navigation.current_view(), session);
-        self.pending_focus = Some(
+        let intent = if self.focus.current().scope == FocusScope::Shell {
             self.focus
-                .restore(topology, self.navigation.focus().clone()),
-        );
+                .restore(topology, self.navigation.focus().clone())
+        } else {
+            self.focus.rebuild(topology)
+        };
+        if intent != FocusIntent::Noop {
+            self.pending_focus = Some(intent);
+        }
     }
 
     fn open_session(&mut self, session: SessionKey, projection: &SessionProjection) -> bool {
@@ -335,6 +340,23 @@ impl MainViewController {
             self.note_focus(trigger, session);
             self.focus
                 .open_overlay("model-effort", Some("model-effort".to_owned()))
+        } else {
+            self.focus.escape()
+        };
+        if intent != FocusIntent::Noop {
+            self.pending_focus = Some(intent);
+        }
+        self.sync_topology(session);
+    }
+
+    fn host_filter_changed(&mut self, open: bool, session: Option<&SessionProjection>) {
+        let intent = if open {
+            let trigger =
+                FocusAnchor::new(self.navigation.current_view().clone(), Region::Navigation)
+                    .with_item("host-filter");
+            self.note_focus(trigger, session);
+            self.focus
+                .open_overlay("host-filter", Some("host-filter".to_owned()))
         } else {
             self.focus.escape()
         };
@@ -392,7 +414,13 @@ impl Workbench {
             )
         });
         let navigation = cx.new(|cx| {
-            SessionNavigation::new(&projection, first.map(|session| &session.key), parent, cx)
+            SessionNavigation::new(
+                &projection,
+                first.map(|session| &session.key),
+                parent,
+                window,
+                cx,
+            )
         });
         let parent = cx.weak_entity();
         let timeline = first.map(|session| cx.new(|cx| SessionTimeline::new(session, parent, cx)));
@@ -505,6 +533,27 @@ impl Workbench {
         self.apply_pending_focus(window, cx);
     }
 
+    fn host_filter_changed(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.current_projection().cloned();
+        if let Some(controller) = &mut self.controller {
+            controller.host_filter_changed(open, current.as_ref());
+        }
+        self.apply_pending_focus(window, cx);
+    }
+
+    fn host_filter_focused(&mut self, cx: &mut App) {
+        let view = self
+            .controller
+            .as_ref()
+            .map(|controller| controller.navigation.current_view().clone());
+        if let Some(view) = view {
+            self.note_focus(
+                FocusAnchor::new(view, Region::Navigation).with_item("host-filter"),
+                cx,
+            );
+        }
+    }
+
     fn note_focus(&mut self, anchor: FocusAnchor, _cx: &mut App) {
         let current = self.current_projection().cloned();
         if let Some(controller) = &mut self.controller {
@@ -586,6 +635,25 @@ impl Workbench {
                 composer.apply_local_queues(&mut projection, cx);
             });
         }
+        let host_menu_open = self.controller.as_ref().is_some_and(|controller| {
+            matches!(
+                controller.focus.current().scope,
+                FocusScope::Overlay(id) if id == "host-filter"
+            )
+        });
+        let close_host_menu = host_menu_open && self.navigation.read(cx).hosts_changed(&projection);
+        let focus_header_after_close = close_host_menu && projection.sessions.is_empty();
+        if close_host_menu {
+            // DropdownMenu builds its items once per opening. Keep the stale
+            // popup focused until Cancel; an empty shell focuses Header next.
+            let header_focus = self.header_focus.clone();
+            window.defer(cx, move |window, cx| {
+                window.dispatch_action(Box::new(gpui_kit::base::actions::Cancel), cx);
+                if focus_header_after_close {
+                    header_focus.focus(window, cx);
+                }
+            });
+        }
         let previous_session = self.current_projection().map(|session| session.key.clone());
         self.projection = projection;
         let live = self
@@ -651,7 +719,7 @@ impl Workbench {
         });
         if self.controller.is_some() {
             self.apply_pending_focus(window, cx);
-        } else {
+        } else if !focus_header_after_close {
             self.header_focus.clone().focus(window, cx);
         }
         cx.notify();
@@ -693,6 +761,9 @@ impl Workbench {
 
     fn resolve_focus(&self, target: &FocusTarget, cx: &App) -> Option<ResolvedFocus> {
         match target.anchor.region {
+            Region::Navigation if target.anchor.item_id.as_deref() == Some("host-filter") => Some(
+                ResolvedFocus::Handle(self.navigation.read(cx).filter_focus()),
+            ),
             Region::Navigation => {
                 Some(ResolvedFocus::Tree(self.navigation.read(cx).tree_state(cx)))
             }
