@@ -509,16 +509,80 @@ impl Workbench {
         }
     }
 
+    fn queue_item_changed(&mut self, session: &SessionKey, item_id: &str, text: String) {
+        let Some(item) = self
+            .projection
+            .sessions
+            .iter_mut()
+            .find(|projection| &projection.key == session)
+            .and_then(|projection| projection.queue.iter_mut().find(|item| item.id == item_id))
+        else {
+            return;
+        };
+        item.text = text;
+    }
+
+    fn replace_queue(
+        &mut self,
+        session: SessionKey,
+        queue: Vec<QueueItemProjection>,
+        removed_item: Option<String>,
+        focus_item: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A removed Cancel button is not guaranteed to emit another focus event.
+        // Seed its row anchor so removing the last row can fall back to Composer.
+        if let Some(item_id) = removed_item {
+            let current = self.current_projection().cloned();
+            if let Some(controller) = &mut self.controller {
+                controller.note_focus(
+                    FocusAnchor::new(MainView::Session(session.clone()), Region::Queue)
+                        .with_item(item_id),
+                    current.as_ref(),
+                );
+            }
+        }
+        let Some(projection) = self
+            .projection
+            .sessions
+            .iter_mut()
+            .find(|projection| projection.key == session)
+        else {
+            return;
+        };
+        projection.queue = queue;
+        let current = self.current_projection().cloned();
+        if let Some(controller) = &mut self.controller {
+            if let Some(item_id) = focus_item {
+                controller.note_focus(
+                    FocusAnchor::new(MainView::Session(session), Region::Queue).with_item(item_id),
+                    current.as_ref(),
+                );
+                controller.restore_current_focus();
+            } else {
+                controller.sync_topology(current.as_ref());
+            }
+        }
+        self.apply_pending_focus(window, cx);
+        cx.notify();
+    }
+
     /// Injection seam for a future Host subscription and deterministic tests.
     #[cfg(test)]
     fn replace_projection(
         &mut self,
-        projection: WorkbenchProjection,
+        mut projection: WorkbenchProjection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use std::collections::BTreeSet;
 
+        if let Some(composer) = &self.composer {
+            composer.read_with(cx, |composer, cx| {
+                composer.apply_local_queues(&mut projection, cx);
+            });
+        }
         self.projection = projection;
         let live = self
             .projection
@@ -635,10 +699,13 @@ impl Workbench {
                 .composer
                 .as_ref()
                 .map(|composer| ResolvedFocus::Handle(composer.read(cx).approval_focus(cx))),
-            Region::Queue => self
-                .composer
-                .as_ref()
-                .map(|composer| ResolvedFocus::Handle(composer.read(cx).queue_focus(cx))),
+            Region::Queue => self.composer.as_ref().map(|composer| {
+                ResolvedFocus::Handle(
+                    composer
+                        .read(cx)
+                        .queue_focus(target.anchor.item_id.as_deref(), cx),
+                )
+            }),
             Region::Composer => self.composer.as_ref().map(|composer| {
                 let composer = composer.read(cx);
                 let handle = if target.anchor.item_id.as_deref() == Some("model-effort") {
@@ -757,6 +824,7 @@ impl Render for Workbench {
                                 .children(composer.map(|composer| {
                                     div()
                                         .id("session-composer-region")
+                                        .test_support()
                                         .absolute()
                                         .left_0()
                                         .right_0()

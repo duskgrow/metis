@@ -12,7 +12,7 @@
 
 [产品入口](../crates/metis/src/main.rs)只创建离线 `Workbench`，显示真实 Offline 空状态；交互 preview 仅由测试注入投影和 effect，不是产品运行模式。`FocusTopology` 的方向移动只有纯模型，未绑定产品键位；Diff 与只读 Subagent 仍只有纯历史／归属模型和来源返回壳，不是完整原生 UI。
 
-已有纯行为测试、Session 测试和组件 headless probes 通过，具体覆盖以测试代码为准。这些证据不代表 Workbench 已接入真实 Host，也不覆盖完整 Diff/Subagent UI、Queue 编辑／取消／重放或完整冷启动；高对比、200% 缩放、真实 IME、真实辅助技术、性能与原生视觉验收均未完成。本文继续是 Draft 工程契约，局部落地不自动晋升 Stable。
+已有纯行为测试、Session 测试和组件 headless probes 通过，具体覆盖以测试代码为准。这些证据不代表 Workbench 已接入真实 Host，也不覆盖完整 Diff/Subagent UI、Queue 的真实 Host 提交或完整冷启动；高对比、200% 缩放、真实 IME、真实辅助技术、性能与原生视觉验收均未完成。本文继续是 Draft 工程契约，局部落地不自动晋升 Stable。
 
 ## 1. 规范来源与冲突处理
 
@@ -96,7 +96,8 @@ Diff 与只读 Subagent 当前只有纯历史/归属模型和来源返回壳，�
 
 ### 5.3 Composer 原生连续状态
 
-- 每个 Session 的原生 Textarea/MessageScroller 唯一持有并恢复 draft、selection 与 scroll；Queue 使用稳定 item ID，FocusAnchor 由本地历史保存。Send/Queue 可用性及 Queue 行为遵循体验正本。
+- 每个 Session 的原生 Textarea/MessageScroller 唯一持有并恢复 draft、selection 与 scroll；Send intent 仅被本地记录时保留 draft，Queue item 已在本地保存文本后可清空 Composer draft。Send/Queue 可用性遵循体验正本。
+- Queue 初次由注入 projection 播种，随后每个 Session 的原生 Queue editor 持有本地文本与顺序，后续快照不重置这些编辑。稳定 item ID 同时用于定位、取消和 FocusAnchor 恢复；取消非末项后聚焦相邻存活项，空 Queue 回退 Composer。
 - streaming 和审批异步更新不得抢走 draft、其他工具或 popover 的焦点，也不得重置 selection/scroll；jump-to-latest 恢复 tail，按钮即将隐藏且仍持有焦点时先聚焦对应 ToolSummary，再移除或禁用按钮。
 
 ### 5.4 三域统计数据边界
@@ -142,7 +143,7 @@ Activity 只描述完整 Session 的执行活动与耗时；Usage 只描述 toke
 
 1. **Theme / assets**：已有生产 `ThemeController` 的有损投影、Light/Dark 重载、状态保留和选择性图标来源测试；仍需目标环境的真实渲染与视觉验收。
 2. **Focus / Disclosure / Tree / Popover**：已有纯焦点模型及菜单、弹层、Disclosure、Session 的 headless 覆盖。`FocusMove` 尚无产品键位绑定，不能声称方向性键盘主流程已完成；仍需验证真实焦点恢复以及 Tree 重建、Overlay 关闭后的行为。
-3. **Streaming / tool identity**：已有流式 Markdown、阅读位置和 Session intent／同一工具卡覆盖；真实 Host 提交、提交中断连、重连代际、Queue 编辑／取消／重放与其他客户端事件仍未完成。
+3. **Streaming / tool identity**：已有流式 Markdown、阅读位置和 Session intent／同一工具卡覆盖；Queue 编辑／取消、审批完成及注入重连快照后不重放也已有 headless 覆盖。真实 Host 提交、提交中断连、真实重连代际与其他客户端事件仍未完成。
 4. **Markdown security**：已有生产 `AgentMarkdown` 的 raw HTML、链接确认与图片拒绝 headless probe；这不扩展为 OS 桌面集成或原生视觉验收。
 5. **200% 中文、长路径、窄布局与 DPI**：未完成。需在 200% 或平台上限验证内容和动作可达、局部滚动及焦点／选区／滚动锚点保留，并覆盖高对比和减少动效。
 6. **真实 IME**：未完成。需在 Composer 的流式更新、弹层和 Session 切换中验证 preedit、候选提交、选区与剪贴板；里程碑 0 的 GPUI Kit IME 结果和无头输入结果均不能替代此项。

@@ -127,6 +127,25 @@ fn decided_preview() -> WorkbenchProjection {
     projection
 }
 
+fn queued_preview() -> WorkbenchProjection {
+    let mut projection = pending_preview();
+    projection.sessions[0].queue = vec![
+        QueueItemProjection {
+            id: "q1".to_owned(),
+            text: "排队：先核对 Host 快照".to_owned(),
+        },
+        QueueItemProjection {
+            id: "q2".to_owned(),
+            text: "排队：保留现有测试".to_owned(),
+        },
+    ];
+    projection.sessions[1].queue = vec![QueueItemProjection {
+        id: "q1".to_owned(),
+        text: "第二个 Session 的 Queue".to_owned(),
+    }];
+    projection
+}
+
 fn open_preview(
     cx: &mut TestAppContext,
     projection: WorkbenchProjection,
@@ -194,6 +213,44 @@ fn scroller<C: gpui_kit::AppContext>(
         .read_with(cx, |view, _| view.timeline.clone())
         .expect("Timeline");
     timeline.read_with(cx, super::timeline::SessionTimeline::scroller_state)
+}
+
+fn queue_input<C: gpui_kit::AppContext>(
+    view: &Entity<Workbench>,
+    cx: &C,
+    item_id: &str,
+) -> Entity<gpui_kit::component::input::TextareaState> {
+    let composer = view
+        .read_with(cx, |view, _| view.composer.clone())
+        .expect("Composer");
+    composer
+        .read_with(cx, |composer, cx| composer.queue_input(item_id, cx))
+        .unwrap_or_else(|| panic!("Queue item {item_id}"))
+}
+
+fn set_queue_text(cx: &mut VisualTestContext, view: &Entity<Workbench>, item_id: &str, text: &str) {
+    let input = queue_input(view, cx, item_id);
+    cx.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            let end = input.value().len();
+            input.set_selected_range(0..end, cx);
+            input.focus(window, cx);
+        });
+        window.render_frame(cx);
+        window.input(text, cx);
+    });
+    settle(cx);
+}
+
+fn scroll_composer(cx: &mut VisualTestContext, delta: f32) {
+    cx.update(|window, cx| {
+        window.scroll(
+            "session-composer-region",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(delta))),
+            cx,
+        );
+    });
+    settle(cx);
 }
 
 fn set_draft(
@@ -305,12 +362,13 @@ fn session_controller_first_focus_and_overlay_return_are_pure_intents() {
 }
 
 #[gpui_kit::test]
-fn session_send_and_queue_record_intents_without_clearing_draft_or_faking_host(
-    cx: &mut TestAppContext,
-) {
+fn session_send_records_intent_without_clearing_draft_or_faking_host(cx: &mut TestAppContext) {
     let (handle, view, intents) = open_preview(cx, preview());
     let mut cx = visual(handle, cx);
     set_draft(&mut cx, &view, "draft to send", 2..7);
+    let timeline_len = view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().items.len()
+    });
     cx.update(|window, cx| {
         assert_eq!(window.find("composer-submit").label(), Some("Send"));
         window.click("composer-submit", cx);
@@ -329,17 +387,35 @@ fn session_send_and_queue_record_intents_without_clearing_draft_or_faking_host(
         input(&view, &cx).read_with(&cx, |input, _| input.value()),
         "draft to send"
     );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .items
+            .len()),
+        timeline_len,
+        "a locally recorded Send must not synthesize a user message"
+    );
+}
 
+#[gpui_kit::test]
+fn session_queue_clears_recorded_draft_and_preserves_offline_draft(cx: &mut TestAppContext) {
     let mut running = preview();
     running.sessions[0].execution = ExecutionState::Running;
-    replace(&mut cx, &view, running);
+    let (handle, view, intents) = open_preview(cx, running);
+    let mut cx = visual(handle, cx);
+    set_draft(&mut cx, &view, "draft to queue", 0..5);
+    let timeline_len = view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().items.len()
+    });
+    let before_scroll = scroller(&view, &cx).read_with(&cx, |state, _| state.logical_scroll_top());
     cx.update(|window, cx| {
         assert_eq!(window.find("composer-submit").label(), Some("Queue"));
         window.click("composer-submit", cx);
     });
     settle(&mut cx);
-    assert_eq!(intents.borrow().len(), 2);
-    match &intents.borrow()[1] {
+    assert_eq!(intents.borrow().len(), 1);
+    match &intents.borrow()[0] {
         SessionIntent::Queue {
             session: key,
             item_id,
@@ -349,24 +425,455 @@ fn session_send_and_queue_record_intents_without_clearing_draft_or_faking_host(
         } => {
             assert_eq!(key, &session("one"));
             assert!(item_id.contains("queue-intent:1"));
-            assert_eq!(text, "draft to send");
+            assert_eq!(text, "draft to queue");
             assert_eq!(model, "model-a");
             assert_eq!(effort.as_deref(), Some("Low"));
         }
         other => panic!("expected Queue intent, got {other:?}"),
     }
+    assert_eq!(
+        input(&view, &cx).read_with(&cx, |input, _| input.value()),
+        ""
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .items
+            .len()),
+        timeline_len,
+        "Queue must not append a user message"
+    );
+    assert_eq!(
+        scroller(&view, &cx).read_with(&cx, |state, _| state.logical_scroll_top()),
+        before_scroll,
+        "Queue must not move the reading position"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .len()),
+        1
+    );
 
     let mut offline = preview();
     offline.connection = ConnectionState::Offline;
     offline.sessions[0].execution = ExecutionState::Running;
     replace(&mut cx, &view, offline);
+    set_draft(&mut cx, &view, "offline draft", 0..7);
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .clone()),
+        vec![QueueItemProjection {
+            id: format!("{}:queue-intent:1", session_id(&session("one"))),
+            text: "draft to queue".to_owned(),
+        }],
+        "an empty snapshot must not erase a locally recorded Queue item"
+    );
     cx.update(|window, cx| window.click("composer-submit", cx));
     settle(&mut cx);
-    assert_eq!(intents.borrow().len(), 2, "Offline cannot emit Queue");
+    assert_eq!(intents.borrow().len(), 1, "Offline cannot emit Queue");
     assert_eq!(
         input(&view, &cx).read_with(&cx, |input, _| input.value()),
-        "draft to send"
+        "offline draft"
     );
+}
+
+#[gpui_kit::test]
+fn queue_allocation_skips_preloaded_intent_ids(cx: &mut TestAppContext) {
+    let mut projection = preview();
+    projection.sessions[0].execution = ExecutionState::Running;
+    let existing_id = format!("{}:queue-intent:1", session_id(&session("one")));
+    projection.sessions[0].queue = vec![QueueItemProjection {
+        id: existing_id.clone(),
+        text: "existing queued prompt".to_owned(),
+    }];
+    let (handle, view, intents) = open_preview(cx, projection);
+    let mut cx = visual(handle, cx);
+    set_draft(&mut cx, &view, "new queued prompt", 0..3);
+    scroll_composer(&mut cx, -1000.);
+    cx.update(|window, cx| window.click("composer-submit", cx));
+    settle(&mut cx);
+
+    assert_eq!(intents.borrow().len(), 1);
+    match &intents.borrow()[0] {
+        SessionIntent::Queue { item_id, .. } => {
+            assert_ne!(item_id, &existing_id);
+            assert_eq!(
+                item_id,
+                &format!("{}:queue-intent:2", session_id(&session("one")))
+            );
+        }
+        other => panic!("expected Queue intent, got {other:?}"),
+    }
+    let queue = view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().queue.clone()
+    });
+    assert_eq!(queue.len(), 2);
+    assert_ne!(queue[0].id, queue[1].id);
+}
+
+#[gpui_kit::test]
+fn queue_edit_updates_only_target_item_and_preserves_other_sessions(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_preview());
+    let mut cx = visual(handle, cx);
+    cx.update(|window, _| window.activate_window());
+    settle(&mut cx);
+    let first = queue_input(&view, &cx, "q1");
+    let second = queue_input(&view, &cx, "q2");
+    let first_id = first.entity_id();
+    let second_id = second.entity_id();
+    let timeline_len = view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().items.len()
+    });
+
+    set_queue_text(
+        &mut cx,
+        &view,
+        "q1",
+        "排队：先核对 Host 快照，再决定是否扩大测试。",
+    );
+    assert_eq!(queue_input(&view, &cx, "q1").entity_id(), first_id);
+    assert_eq!(queue_input(&view, &cx, "q2").entity_id(), second_id);
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .clone()),
+        vec![
+            QueueItemProjection {
+                id: "q1".to_owned(),
+                text: "排队：先核对 Host 快照，再决定是否扩大测试。".to_owned(),
+            },
+            QueueItemProjection {
+                id: "q2".to_owned(),
+                text: "排队：保留现有测试".to_owned(),
+            },
+        ]
+    );
+
+    cx.update(|window, cx| {
+        first.update(cx, |input, cx| {
+            input.set_selected_range(3..9, cx);
+            input.focus(window, cx);
+        });
+    });
+    settle(&mut cx);
+    assert_eq!(
+        view.read_with(&cx, |view, _| {
+            view.controller.as_ref().unwrap().navigation.focus().clone()
+        }),
+        FocusAnchor::new(MainView::Session(session("one")), Region::Queue).with_item("q1")
+    );
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_session(session("two"), window, cx));
+    });
+    settle(&mut cx);
+    let other = queue_input(&view, &cx, "q1");
+    assert_ne!(other.entity_id(), first_id);
+    assert_eq!(
+        other.read_with(&cx, |input, _| input.value()),
+        "第二个 Session 的 Queue"
+    );
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.open_session(session("one"), window, cx));
+    });
+    settle(&mut cx);
+    assert_eq!(queue_input(&view, &cx, "q1").entity_id(), first_id);
+    assert_eq!(queue_input(&view, &cx, "q2").entity_id(), second_id);
+    assert_eq!(
+        first.read_with(&cx, |input, _| input.value()),
+        "排队：先核对 Host 快照，再决定是否扩大测试。"
+    );
+    assert_eq!(
+        first.read_with(&cx, |input, _| input.selected_range()),
+        3..9
+    );
+    cx.update(|window, cx| {
+        assert!(first.read(cx).focus_handle(cx).is_focused(window));
+    });
+
+    replace(&mut cx, &view, queued_preview());
+    assert_eq!(
+        first.read_with(&cx, |input, _| input.value()),
+        "排队：先核对 Host 快照，再决定是否扩大测试。"
+    );
+    assert_eq!(
+        first.read_with(&cx, |input, _| input.selected_range()),
+        3..9
+    );
+    cx.update(|window, cx| {
+        assert!(first.read(cx).focus_handle(cx).is_focused(window));
+    });
+    assert!(intents.borrow().is_empty(), "editing Queue is local");
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .items
+            .len()),
+        timeline_len
+    );
+}
+
+#[gpui_kit::test]
+fn queue_cancel_removes_only_target_item_and_preserves_other_sessions(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    let retained = queue_input(&view, &cx, "q1").entity_id();
+    scroll_composer(&mut cx, -1000.);
+    cx.update(|window, cx| window.click("queue-cancel:q2", cx));
+    settle(&mut cx);
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .clone()),
+        vec![QueueItemProjection {
+            id: "q1".to_owned(),
+            text: "排队：先核对 Host 快照".to_owned(),
+        }]
+    );
+    assert_eq!(queue_input(&view, &cx, "q1").entity_id(), retained);
+    cx.update(|window, cx| {
+        let input = queue_input(&view, cx, "q1");
+        assert!(input.read(cx).focus_handle(cx).is_focused(window));
+    });
+    scroll_composer(&mut cx, 1000.);
+    cx.update(|window, _| {
+        let painted = test_support::texts(window);
+        assert!(
+            painted.iter().any(|text| text.text() == "Queue · 1"),
+            "{painted:?}"
+        );
+    });
+
+    let queue_editor = queue_input(&view, &cx, "q1");
+    cx.update(|window, cx| {
+        queue_editor.update(cx, |input, cx| input.focus(window, cx));
+    });
+    settle(&mut cx);
+    cx.update(|window, cx| window.click("queue-cancel:q1", cx));
+    settle(&mut cx);
+    assert!(view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().queue.is_empty()
+    }));
+    assert_eq!(
+        view.read_with(&cx, |view, _| view.projection.sessions[1].queue.clone()),
+        vec![QueueItemProjection {
+            id: "q1".to_owned(),
+            text: "第二个 Session 的 Queue".to_owned(),
+        }]
+    );
+    cx.update(|window, cx| {
+        assert!(window.try_find("session-queue").is_none());
+        assert!(
+            input(&view, cx)
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+    });
+    assert!(intents.borrow().is_empty(), "cancelling Queue is local");
+}
+
+#[gpui_kit::test]
+fn approval_completion_does_not_replay_queue_or_append_messages(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    set_queue_text(&mut cx, &view, "q1", "本地编辑后的 Queue");
+    scroll_composer(&mut cx, -1000.);
+    cx.update(|window, cx| window.click("queue-cancel:q2", cx));
+    settle(&mut cx);
+    scroll_composer(&mut cx, 1000.);
+    let timeline_len = view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().items.len()
+    });
+    let queues = view.read_with(&cx, |view, _| {
+        view.projection
+            .sessions
+            .iter()
+            .map(|session| session.queue.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        queues[0],
+        vec![QueueItemProjection {
+            id: "q1".to_owned(),
+            text: "本地编辑后的 Queue".to_owned(),
+        }]
+    );
+    cx.update(|window, cx| window.click("approval-allow-call-1", cx));
+    settle(&mut cx);
+    assert_eq!(intents.borrow().len(), 1);
+
+    let mut submitting = queued_preview();
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut submitting.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    call.approval = ApprovalState::Submitting;
+
+    let mut running = queued_preview();
+    running.sessions[0].execution = ExecutionState::Running;
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut running.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
+    call.execution = ExecutionState::Running;
+
+    let mut succeeded = queued_preview();
+    succeeded.sessions[0].execution = ExecutionState::Succeeded;
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut succeeded.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
+    call.execution = ExecutionState::Succeeded;
+    call.output = Some("Host confirmed completion.".to_owned());
+
+    for next in [submitting, running, succeeded] {
+        replace(&mut cx, &view, next);
+        assert_eq!(
+            intents.borrow().len(),
+            1,
+            "completion must not replay Queue"
+        );
+        assert_eq!(
+            view.read_with(&cx, |view, _| {
+                view.projection
+                    .sessions
+                    .iter()
+                    .map(|session| session.queue.clone())
+                    .collect::<Vec<_>>()
+            }),
+            queues
+        );
+        assert_eq!(
+            view.read_with(&cx, |view, _| view
+                .current_projection()
+                .unwrap()
+                .items
+                .len()),
+            timeline_len,
+            "completion must not append queued user messages"
+        );
+    }
+    cx.update(|window, _| {
+        assert_eq!(window.find("composer-submit").label(), Some("Send"));
+    });
+}
+
+#[gpui_kit::test]
+fn reconnect_does_not_replay_queue_or_revive_stale_approval(cx: &mut TestAppContext) {
+    let mut offline = queued_preview();
+    offline.connection = ConnectionState::Offline;
+    let (handle, view, intents) = open_preview(cx, offline);
+    let mut cx = visual(handle, cx);
+    set_draft(&mut cx, &view, "重连期间保留草稿", 0..4);
+    let queue = view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().queue.clone()
+    });
+    let timeline_len = view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().items.len()
+    });
+    cx.update(|window, cx| {
+        assert_eq!(window.find("approval-allow-call-1").disabled(), Some(true));
+        window.click("approval-allow-call-1", cx);
+    });
+    settle(&mut cx);
+    cx.update(|window, cx| {
+        window.scroll(
+            "session-composer-region",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1000.))),
+            cx,
+        );
+    });
+    settle(&mut cx);
+    cx.update(|window, cx| {
+        assert_eq!(window.find("composer-submit").disabled(), Some(true));
+        window.click("composer-submit", cx);
+    });
+    settle(&mut cx);
+    assert!(intents.borrow().is_empty());
+
+    let mut reconnected = queued_preview();
+    reconnected.sessions[0].generation = 8;
+    reconnected.sessions[0].execution = ExecutionState::Unknown;
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut reconnected.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    call.approval = ApprovalState::Stale;
+    call.execution = ExecutionState::Unknown;
+    call.output = Some("Execution: Unknown · Not replayed".to_owned());
+    replace(&mut cx, &view, reconnected);
+    assert!(
+        intents.borrow().is_empty(),
+        "reconnect must not replay intents"
+    );
+    assert_eq!(
+        input(&view, &cx).read_with(&cx, |input, _| input.value()),
+        "重连期间保留草稿"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .clone()),
+        queue
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .items
+            .len()),
+        timeline_len
+    );
+    cx.update(|window, _| {
+        assert!(window.try_find("approval-allow-call-1").is_none());
+    });
+
+    for key in [session("two"), session("one")] {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.open_session(key, window, cx));
+        });
+        settle(&mut cx);
+    }
+    assert!(intents.borrow().is_empty());
+    assert_eq!(
+        view.read_with(&cx, |view, _| view.projection.connection),
+        ConnectionState::Online
+    );
+    assert!(view.read_with(&cx, |view, _| {
+        matches!(
+            view.current_projection().unwrap().items[2],
+            TimelineItem::Tool(ToolCallProjection {
+                approval: ApprovalState::Stale,
+                execution: ExecutionState::Unknown,
+                ..
+            })
+        )
+    }));
+    cx.update(|window, cx| window.click("tool-call-1-summary", cx));
+    settle(&mut cx);
+    cx.update(|window, _| {
+        assert!(
+            test_support::texts(window)
+                .iter()
+                .any(|text| { text.text().contains("Execution: Unknown · Not replayed") })
+        );
+    });
 }
 
 #[gpui_kit::test]

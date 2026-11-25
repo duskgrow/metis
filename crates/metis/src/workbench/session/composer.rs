@@ -33,8 +33,15 @@ enum StatsDomain {
     Context,
 }
 
+struct QueueItemState {
+    id: String,
+    input: Entity<TextareaState>,
+    _input_subscription: Subscription,
+}
+
 struct ComposerSession {
     input: Entity<TextareaState>,
+    queue: Vec<QueueItemState>,
     queue_focus: FocusHandle,
     menu_focus: FocusHandle,
     stats_focus: BTreeMap<StatsDomain, FocusHandle>,
@@ -44,6 +51,7 @@ struct ComposerSession {
     next_queue_id: u64,
     open_stats: BTreeSet<StatsDomain>,
     _input_subscription: Subscription,
+    _queue_focus_subscription: Subscription,
     _approval_focus_subscription: Subscription,
 }
 
@@ -55,7 +63,6 @@ pub(super) struct Composer {
     generation: u64,
     execution: ExecutionState,
     approval: Option<ToolCallProjection>,
-    queue: Vec<QueueItemProjection>,
     permission: SessionPermissionPolicy,
     models: Vec<ModelSpec>,
     stats: StatsInput,
@@ -80,7 +87,6 @@ impl Composer {
             generation: projection.generation,
             execution: projection.execution,
             approval: projection.pending_approval().cloned(),
-            queue: projection.queue.clone(),
             permission: projection.permission,
             models: projection.models.clone(),
             stats: projection.stats.clone(),
@@ -105,13 +111,106 @@ impl Composer {
         self.generation = projection.generation;
         self.execution = projection.execution;
         self.approval = projection.pending_approval().cloned();
-        self.queue.clone_from(&projection.queue);
         self.permission = projection.permission;
         self.models.clone_from(&projection.models);
         self.stats = projection.stats.clone();
         self.feedback = None;
         self.ensure_state(projection, window, cx);
         cx.notify();
+    }
+
+    fn new_queue_item(
+        session: &SessionKey,
+        item: &QueueItemProjection,
+        parent: WeakEntity<Workbench>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> QueueItemState {
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 4)
+                .placeholder("Queued message")
+                .default_value(item.text.clone())
+        });
+        let changed_input = input.clone();
+        let changed_session = session.clone();
+        let changed_item_id = item.id.clone();
+        let changed_parent = parent.clone();
+        let focused_session = session.clone();
+        let focused_item_id = item.id.clone();
+        let subscription = cx.subscribe(&input, move |_, _, event, cx| match event {
+            InputEvent::Change => {
+                let input = changed_input.clone();
+                let session = changed_session.clone();
+                let item_id = changed_item_id.clone();
+                let parent = changed_parent.clone();
+                cx.defer(move |cx| {
+                    let text = input.read(cx).value().to_string();
+                    if let Some(parent) = parent.upgrade() {
+                        parent.update(cx, |parent, _| {
+                            parent.queue_item_changed(&session, &item_id, text);
+                        });
+                    }
+                });
+                cx.notify();
+            }
+            InputEvent::Blur => cx.notify(),
+            InputEvent::Focus => {
+                let anchor =
+                    FocusAnchor::new(MainView::Session(focused_session.clone()), Region::Queue)
+                        .with_item(focused_item_id.clone());
+                let parent = parent.clone();
+                cx.defer(move |cx| {
+                    if let Some(parent) = parent.upgrade() {
+                        parent.update(cx, |parent, cx| parent.note_focus(anchor, cx));
+                    }
+                });
+            }
+            InputEvent::PressEnter { .. } => {}
+        });
+        QueueItemState {
+            id: item.id.clone(),
+            input,
+            _input_subscription: subscription,
+        }
+    }
+
+    fn queue_focus_scope(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (FocusHandle, Subscription) {
+        let focus = cx.focus_handle();
+        let subscription = cx.on_focus_in(&focus, window, |this, window, cx| {
+            let Some(state) = this.states.get(&this.session) else {
+                return;
+            };
+            let focus = state.queue_focus.clone();
+            if !focus.contains_focused(window, cx) {
+                return;
+            }
+            let item_id = state.queue.iter().find_map(|item| {
+                item.input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx)
+                    .then(|| item.id.clone())
+            });
+            let mut anchor =
+                FocusAnchor::new(MainView::Session(this.session.clone()), Region::Queue);
+            if let Some(item_id) = item_id {
+                anchor = anchor.with_item(item_id);
+            }
+            let parent = this.parent.clone();
+            window.defer(cx, move |window, cx| {
+                if !focus.contains_focused(window, cx) {
+                    return;
+                }
+                if let Some(parent) = parent.upgrade() {
+                    parent.update(cx, |parent, cx| parent.note_focus(anchor, cx));
+                }
+            });
+        });
+        (focus, subscription)
     }
 
     fn ensure_state(
@@ -175,6 +274,7 @@ impl Composer {
                     }
                 });
             });
+        let (queue_focus, queue_focus_subscription) = Self::queue_focus_scope(window, cx);
         let initial_model = projection
             .initial_model
             .clone()
@@ -195,11 +295,17 @@ impl Composer {
         .into_iter()
         .map(|domain| (domain, cx.focus_handle()))
         .collect();
+        let queue = projection
+            .queue
+            .iter()
+            .map(|item| Self::new_queue_item(&key, item, self.parent.clone(), window, cx))
+            .collect();
         self.states.insert(
             key,
             ComposerSession {
                 input,
-                queue_focus: cx.focus_handle(),
+                queue,
+                queue_focus,
                 menu_focus: cx.focus_handle(),
                 stats_focus,
                 approval_focus,
@@ -208,6 +314,7 @@ impl Composer {
                 next_queue_id: 0,
                 open_stats: BTreeSet::new(),
                 _input_subscription: input_subscription,
+                _queue_focus_subscription: queue_focus_subscription,
                 _approval_focus_subscription: approval_focus_subscription,
             },
         );
@@ -239,12 +346,18 @@ impl Composer {
             .focus_handle(cx)
     }
 
-    pub(super) fn queue_focus(&self, _: &App) -> FocusHandle {
-        self.states
+    pub(super) fn queue_focus(&self, item_id: Option<&str>, cx: &App) -> FocusHandle {
+        let state = self
+            .states
             .get(&self.session)
-            .expect("current Composer state")
-            .queue_focus
-            .clone()
+            .expect("current Composer state");
+        let item = item_id
+            .and_then(|item_id| state.queue.iter().find(|item| item.id == item_id))
+            .or_else(|| item_id.and_then(|_| state.queue.first()));
+        item.map_or_else(
+            || state.queue_focus.clone(),
+            |item| item.input.read(cx).focus_handle(cx),
+        )
     }
 
     pub(super) fn approval_focus(&self, _: &App) -> FocusHandle {
@@ -253,6 +366,76 @@ impl Composer {
             .expect("current Composer state")
             .approval_focus
             .clone()
+    }
+
+    fn queue_snapshot(&self, session: &SessionKey, cx: &App) -> Option<Vec<QueueItemProjection>> {
+        self.states.get(session).map(|state| {
+            state
+                .queue
+                .iter()
+                .map(|item| QueueItemProjection {
+                    id: item.id.clone(),
+                    text: item.input.read(cx).value().to_string(),
+                })
+                .collect()
+        })
+    }
+
+    // Queue contents are client-local, so injected snapshots must not erase edits.
+    #[cfg(test)]
+    pub(super) fn apply_local_queues(&self, projection: &mut super::WorkbenchProjection, cx: &App) {
+        for session in &mut projection.sessions {
+            if let Some(queue) = self.queue_snapshot(&session.key, cx) {
+                session.queue = queue;
+            }
+        }
+    }
+
+    fn schedule_queue_sync(
+        &self,
+        removed_item: Option<String>,
+        focus_item: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(queue) = self.queue_snapshot(&self.session, cx) else {
+            return;
+        };
+        let session = self.session.clone();
+        let parent = self.parent.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(parent) = parent.upgrade() {
+                parent.update(cx, |parent, cx| {
+                    parent.replace_queue(session, queue, removed_item, focus_item, window, cx);
+                });
+            }
+        });
+    }
+
+    fn cancel_queue_item(&mut self, item_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.states.get_mut(&self.session) else {
+            return;
+        };
+        let Some(index) = state.queue.iter().position(|item| item.id == item_id) else {
+            return;
+        };
+        state.queue.remove(index);
+        let focus_item = state
+            .queue
+            .get(index)
+            .or_else(|| state.queue.last())
+            .map(|item| item.id.clone());
+        self.schedule_queue_sync(Some(item_id.to_owned()), focus_item, window, cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(super) fn queue_input(&self, item_id: &str, _: &App) -> Option<Entity<TextareaState>> {
+        self.states
+            .get(&self.session)?
+            .queue
+            .iter()
+            .find_map(|item| (item.id == item_id).then(|| item.input.clone()))
     }
 
     fn current_selection(&self) -> Option<(String, Option<String>)> {
@@ -354,12 +537,13 @@ impl Composer {
         cx.notify();
     }
 
-    fn submit(&mut self, cx: &mut Context<Self>) {
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selection = self.current_selection();
         let Some(state) = self.states.get_mut(&self.session) else {
             return;
         };
-        let text = state.input.read(cx).value().to_string();
+        let input = state.input.clone();
+        let text = input.read(cx).value().to_string();
         let Some(action) = primary_action(
             self.connection,
             self.execution,
@@ -378,37 +562,59 @@ impl Composer {
             return;
         };
         let (model, effort) = selection.expect("primary action requires a valid model");
-        let intent = match action {
-            ComposerAction::Send => SessionIntent::Send {
-                session: self.session.clone(),
-                text,
-                model,
-                effort,
-            },
-            ComposerAction::Queue => {
-                state.next_queue_id += 1;
-                SessionIntent::Queue {
-                    item_id: format!(
-                        "{}:queue-intent:{}",
-                        session_id(&self.session),
-                        state.next_queue_id
-                    ),
+        let (intent, queued_item) = match action {
+            ComposerAction::Send => (
+                SessionIntent::Send {
                     session: self.session.clone(),
                     text,
                     model,
                     effort,
-                }
+                },
+                None,
+            ),
+            ComposerAction::Queue => {
+                let id = loop {
+                    state.next_queue_id += 1;
+                    let id = format!(
+                        "{}:queue-intent:{}",
+                        session_id(&self.session),
+                        state.next_queue_id
+                    );
+                    if !state.queue.iter().any(|item| item.id == id) {
+                        break id;
+                    }
+                };
+                let item = QueueItemProjection { id, text };
+                (
+                    SessionIntent::Queue {
+                        item_id: item.id.clone(),
+                        session: self.session.clone(),
+                        text: item.text.clone(),
+                        model,
+                        effort,
+                    },
+                    Some(item),
+                )
             }
         };
         let result = (self.effects.borrow_mut())(intent);
-        self.feedback = Some(match result {
+        let recorded = match result {
             #[cfg(test)]
-            EffectResult::Recorded => {
-                "Intent recorded locally; no Host acceptance or execution is claimed.".to_owned()
+            EffectResult::Recorded => true,
+            EffectResult::Unavailable => false,
+        };
+        if recorded && let Some(item) = queued_item {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+            let item = Self::new_queue_item(&self.session, &item, self.parent.clone(), window, cx);
+            if let Some(state) = self.states.get_mut(&self.session) {
+                state.queue.push(item);
             }
-            EffectResult::Unavailable => {
-                "No Host connection is attached; the draft was not sent.".to_owned()
-            }
+            self.schedule_queue_sync(None, None, window, cx);
+        }
+        self.feedback = Some(if recorded {
+            "Intent recorded locally; no Host acceptance or execution is claimed.".to_owned()
+        } else {
+            "No Host connection is attached; the draft was not sent.".to_owned()
         });
         cx.notify();
     }
@@ -457,7 +663,12 @@ impl Render for Composer {
             &open_stats,
             &cx.weak_entity(),
         );
-        let queue = self.queue.clone();
+        let queue = state
+            .queue
+            .iter()
+            .map(|item| (item.id.clone(), item.input.clone()))
+            .collect::<Vec<_>>();
+        let queue_len = queue.len();
         let feedback = self.feedback.clone();
         let approval_dock = self.approval.clone().map(|call| {
             let call_id = call.key.call_id.clone();
@@ -528,6 +739,39 @@ impl Render for Composer {
                 this.select_effort(&action.0, cx);
             }))
             .children(approval_dock)
+            .children((!queue.is_empty()).then(|| {
+                div()
+                    .id("session-queue")
+                    .test_support()
+                    .flex_col()
+                    .gap_2()
+                    .track_focus(&queue_focus)
+                    .child(Label::new(format!("Queue · {queue_len}")))
+                    .children(queue.into_iter().map(|(item_id, input)| {
+                        let cancel_id = item_id.clone();
+                        div()
+                            .id(format!("queue-item:{item_id}"))
+                            .test_support()
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id(format!("queue-editor:{item_id}"))
+                                    .test_support()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Textarea::new(&input).w_full()),
+                            )
+                            .child(
+                                Button::new(format!("queue-cancel:{item_id}"))
+                                    .label("Cancel")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.cancel_queue_item(&cancel_id, window, cx);
+                                    })),
+                            )
+                    }))
+            }))
             .child(
                 div()
                     .flex()
@@ -553,7 +797,7 @@ impl Render for Composer {
                                 ComposerAction::Queue => "Queue",
                             })
                             .disabled(action.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     ),
             )
             .child(
@@ -562,18 +806,6 @@ impl Render for Composer {
                     .test_support()
                     .child(Textarea::new(&input).w_full()),
             )
-            .children((!queue.is_empty()).then(|| {
-                div()
-                    .id("session-queue")
-                    .flex_col()
-                    .track_focus(&queue_focus)
-                    .child("Queue · pending items")
-                    .children(queue.into_iter().map(|item| {
-                        div()
-                            .id(format!("queue-item:{}", item.id))
-                            .child(format!("{} · {}", item.id, item.text))
-                    }))
-            }))
             .children(stats_dock)
             .children(feedback.map(|feedback| {
                 div()
