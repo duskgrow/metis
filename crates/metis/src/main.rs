@@ -19,6 +19,9 @@ use std::{
 };
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "workbench")]
+mod workbench;
+
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
@@ -179,30 +182,6 @@ fn run_entrypoint() -> miette::Result<()> {
 }
 
 #[cfg(feature = "workbench")]
-struct Workbench;
-
-#[cfg(feature = "workbench")]
-impl gpui_kit::Render for Workbench {
-    fn render(
-        &mut self,
-        _: &mut gpui_kit::Window,
-        _: &mut gpui_kit::Context<Self>,
-    ) -> impl gpui_kit::IntoElement {
-        use gpui_kit::{ParentElement as _, Styled as _};
-
-        gpui_kit::div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child("Metis")
-            .child("A place for your projects and agent sessions.")
-    }
-}
-
-#[cfg(feature = "workbench")]
 fn run_workbench() -> miette::Result<()> {
     use gpui_kit::{AppContext as _, assets, init, open_window};
 
@@ -236,8 +215,10 @@ fn run_workbench() -> miette::Result<()> {
             .with_quit_mode(gpui_kit::QuitMode::LastWindowClosed)
             .run(move |cx| {
                 init(cx);
-                open_window(gpui_kit::WindowOptions::default(), cx, |_, cx| {
-                    cx.new(|_| Workbench)
+                open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                    let view = cx.new(|cx| workbench::session::Workbench::offline(window, cx));
+                    view.update(cx, |this, cx| this.mount(window, cx));
+                    view
                 })
                 .expect("failed to open Metis workbench window");
                 launch_state.store(false, Ordering::Release);

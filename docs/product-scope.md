@@ -43,6 +43,37 @@ Metis 让个人用户在一个工作台中操作多台主机上的智能体，�
 
 ### 里程碑 1：本地可用
 
+工作台体验与设计边界见[工作台体验](workbench-experience.md)，原生组件职责与验证顺序见[工作台原生组件契约](workbench-component-contracts.md)，外部依据与后续验证方法见[UI/UX 调研](research/workbench-uiux.md)，日常变更流程见 [`workbench-ui`](../.agents/skills/workbench-ui/SKILL.md)。
+
+**当前状态与交付顺序**
+
+当前切片已完成纯行为模型、Light/Dark 主题写路径、Markdown 安全适配、Disclosure、Session headless 纵切，以及未绑定产品键位的 `FocusTopology`；已有行为测试与 headless probes 通过。原型固化收尾仍未完成，这些局部成果不代表完整原生流程已经接通。
+
+[Workbench 产品入口](../crates/metis/src/main.rs)只创建诚实的 Offline 空状态，不连接 Host 或模拟 Session 执行；交互 preview 只由 [Session 测试](../crates/metis/src/workbench/session/tests.rs)注入投影和 effect，不是产品运行模式。
+
+原型固化收尾是唯一下一阶段。完成后，Workbench 依次清理 `target/` 中本阶段临时产物、接入真实 Host、完成 Diff/Subagent 与 Queue 流程、打通完整冷启动，最后进行 OS/性能验收。工程接手入口和验证边界由上文组件契约持有。
+
+**临时：原型固化收尾与 `target/` 退出条件**
+
+- [ ] 将视觉 token 和布局与已确认原型对齐；任何保留偏差必须经体验与工程双评审明确记录。
+- [ ] 处理当前作者标签、审批 decision dock 位置等已知偏差，并复核受影响状态。
+- [ ] 将已确认原型的完整多 Host/Worktree、Diff/Subagent、Queue 与重连夹具转化为 Rust 测试，覆盖 Queue 编辑、取消和不自动重放。
+- [ ] 将本阶段最终截图保存到 `target/` 外的受控位置，并记录审查范围。
+- [ ] 将有界历史、流式和大文件的性能口径、预算与证据要求写入测试定义。
+- [ ] 确认代码、测试和文档均不依赖 `target/`，并通过 `just ci`。
+
+`target/design/workbench-first-slice/` 下的 HTML 和截图只是待回收的临时参照，不是规范正本；旧 `HANDOFF.md` 与 `native-contract.md` 不作为接手入口。完成本清单并迁出仍需保留的证据后，清理这些临时产物并删除本小节；后续状态回到里程碑与组件契约维护，不把本小节留作历史记录。
+
+**设计准备**
+
+- [x] 建立轻量 UI 变更流程，明确体验语义、主题边界和评审分级。
+- [ ] 完成首个高保真设计切片，贯穿冷启动、环境准备、添加项目、会话、流式输出、审批和差异审查，覆盖真实内容与启动失败、无效目录、重连等状态。
+- [ ] 根据切片提取最小语义令牌、基础组件、产品组件和动作规则，完成浅色、深色与高对比验证。
+- [ ] 完成主题写路径、中文与文本缩放、键盘分栏、真实辅助技术、不可信 Markdown、有界历史投影、流式与大文件性能，以及受控视觉测试等关键探针。
+- [ ] 通过形成性用户测试验证停止误操作、拒绝危险行动、恢复连接和审查改动等核心任务，再扩大实现。
+
+**本地工作流**
+
 - 一次启动即可使用完整工作台。
 - 添加、打开项目，编辑文件并审查差异。
 - 创建、接入和取消智能体会话，查看流式输出并完成审批。
