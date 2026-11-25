@@ -7,6 +7,7 @@ use std::{
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Render, RenderOnce, Subscription,
     WeakEntity, Window,
+    base::TestSupportExt as _,
     component::{
         button::Button,
         label::Label,
@@ -16,7 +17,6 @@ use gpui_kit::{
     div,
     prelude::*,
     px, relative,
-    test::TestSupportExt as _,
 };
 
 use super::{

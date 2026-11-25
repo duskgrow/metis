@@ -6,7 +6,7 @@ use std::{
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, Render, RenderOnce,
     Subscription, WeakEntity, Window,
-    base::Disableable as _,
+    base::{Disableable as _, TestSupportExt as _},
     component::{
         button::Button,
         input::{InputEvent, Textarea, TextareaState},
@@ -15,7 +15,6 @@ use gpui_kit::{
     },
     div,
     prelude::*,
-    test::TestSupportExt as _,
 };
 
 use super::{

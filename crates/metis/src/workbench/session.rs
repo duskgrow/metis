@@ -8,11 +8,11 @@ use std::{cell::RefCell, fmt::Write as _, rc::Rc};
 
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Render, Window,
+    base::TestSupportExt as _,
     component::{ThemeMode, button::Button, tree::TreeState},
     div,
     prelude::*,
     px,
-    test::TestSupportExt as _,
 };
 
 use super::{

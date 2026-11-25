@@ -44,6 +44,8 @@ fmt:
 lint: _js-install
     cargo fmt --all -- --check
     dprint check
+    # --all-targets unifies dev-only GPUI features; check the normal binary too.
+    cargo check --bin metis
     cargo clippy --workspace --all-targets -- -D warnings
     pnpm --filter @metis/dsh-host typecheck
     actionlint -ignore 'SC2086' -ignore 'SC2129'
