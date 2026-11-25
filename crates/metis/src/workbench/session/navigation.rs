@@ -42,8 +42,7 @@ impl SessionNavigation {
         let mut expanded_worktrees = BTreeSet::new();
         let expanded_subagents = BTreeSet::new();
         if let Some(selected) = selected {
-            expanded_projects.insert(selected.worktree.project.clone());
-            expanded_worktrees.insert(selected.worktree.clone());
+            reveal_session(selected, &mut expanded_projects, &mut expanded_worktrees);
         }
         let (items, targets, expansion_targets) = build_items(
             projection,
@@ -106,11 +105,26 @@ impl SessionNavigation {
         self.tree.clone()
     }
 
+    pub(super) fn select_session(
+        &mut self,
+        projection: &WorkbenchProjection,
+        selected: &SessionKey,
+        cx: &mut Context<Self>,
+    ) {
+        reveal_session(
+            selected,
+            &mut self.expanded_projects,
+            &mut self.expanded_worktrees,
+        );
+        self.rebuild(projection, Some(selected), true, cx);
+    }
+
     #[cfg(test)]
     pub(super) fn replace_projection(
         &mut self,
         projection: &WorkbenchProjection,
         selected: Option<&SessionKey>,
+        reveal_selected: bool,
         cx: &mut Context<Self>,
     ) {
         let live_projects = projection
@@ -123,16 +137,34 @@ impl SessionNavigation {
             .iter()
             .map(|session| session.key.worktree.clone())
             .collect::<BTreeSet<_>>();
+        let live_sessions = projection
+            .sessions
+            .iter()
+            .map(|session| &session.key)
+            .collect::<BTreeSet<_>>();
         self.expanded_projects
             .retain(|key| live_projects.contains(key));
         self.expanded_worktrees
             .retain(|key| live_worktrees.contains(key));
-        self.expanded_subagents.retain(|key| {
-            projection
-                .sessions
-                .iter()
-                .any(|session| &session.key == key)
-        });
+        self.expanded_subagents
+            .retain(|key| live_sessions.contains(key));
+        if reveal_selected && let Some(selected) = selected {
+            reveal_session(
+                selected,
+                &mut self.expanded_projects,
+                &mut self.expanded_worktrees,
+            );
+        }
+        self.rebuild(projection, selected, reveal_selected, cx);
+    }
+
+    fn rebuild(
+        &mut self,
+        projection: &WorkbenchProjection,
+        selected: Option<&SessionKey>,
+        reveal_selected: bool,
+        cx: &mut Context<Self>,
+    ) {
         let (items, targets, expansion_targets) = build_items(
             projection,
             &self.expanded_projects,
@@ -144,7 +176,12 @@ impl SessionNavigation {
         self.tree.update(cx, |tree, cx| {
             tree.set_items(items, cx);
             if let Some(selected) = selected {
-                tree.set_selected_item(Some(&TreeItem::new(session_id(selected), "")), cx);
+                let item = TreeItem::new(session_id(selected), "");
+                if reveal_selected || tree.index_of(&item.id).is_some() {
+                    tree.set_selected_item(Some(&item), cx);
+                } else {
+                    tree.set_selected_index(None, cx);
+                }
             } else {
                 tree.set_selected_index(None, cx);
             }
@@ -203,6 +240,15 @@ impl Render for SessionNavigation {
     }
 }
 
+fn reveal_session(
+    selected: &SessionKey,
+    expanded_projects: &mut BTreeSet<ProjectKey>,
+    expanded_worktrees: &mut BTreeSet<WorktreeKey>,
+) {
+    expanded_projects.insert(selected.worktree.project.clone());
+    expanded_worktrees.insert(selected.worktree.clone());
+}
+
 fn build_items(
     projection: &WorkbenchProjection,
     expanded_projects: &BTreeSet<ProjectKey>,
@@ -239,7 +285,8 @@ fn build_items(
                 project_id.clone(),
                 ExpansionTarget::Project(project.clone()),
             );
-            let mut worktree_items = Vec::new();
+            let has_multiple_worktrees = worktrees.len() > 1;
+            let mut project_children = Vec::new();
             for (worktree, sessions) in worktrees {
                 let worktree_id = logical_id(
                     "worktree",
@@ -249,10 +296,12 @@ fn build_items(
                         &worktree.worktree_id,
                     ],
                 );
-                expansion_targets.insert(
-                    worktree_id.clone(),
-                    ExpansionTarget::Worktree(worktree.clone()),
-                );
+                if has_multiple_worktrees {
+                    expansion_targets.insert(
+                        worktree_id.clone(),
+                        ExpansionTarget::Worktree(worktree.clone()),
+                    );
+                }
                 let mut session_items = Vec::new();
                 for session in sessions {
                     let id = session_id(&session.key);
@@ -287,16 +336,20 @@ fn build_items(
                     }
                     session_items.push(item);
                 }
-                worktree_items.push(
-                    TreeItem::new(worktree_id, worktree.worktree_id.clone())
-                        .expanded(expanded_worktrees.contains(&worktree))
-                        .children(session_items),
-                );
+                if has_multiple_worktrees {
+                    project_children.push(
+                        TreeItem::new(worktree_id, worktree.worktree_id.clone())
+                            .expanded(expanded_worktrees.contains(&worktree))
+                            .children(session_items),
+                    );
+                } else {
+                    project_children.extend(session_items);
+                }
             }
             project_items.push(
                 TreeItem::new(project_id, project.project_id.clone())
                     .expanded(expanded_projects.contains(&project))
-                    .children(worktree_items),
+                    .children(project_children),
             );
         }
         roots.push(
@@ -306,4 +359,244 @@ fn build_items(
         );
     }
     (roots, targets, expansion_targets)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::workbench::{
+        identity::SubagentKey,
+        session::{
+            ConnectionState, ExecutionState, SessionPermissionPolicy, SessionProjection,
+            SubagentProjection,
+        },
+        stats::StatsInput,
+    };
+
+    fn session(
+        host: &str,
+        project: &str,
+        worktree: &str,
+        id: &str,
+        title: &str,
+    ) -> SessionProjection {
+        SessionProjection {
+            key: SessionKey::new(
+                WorktreeKey::new(ProjectKey::new(host, project), worktree),
+                id,
+            ),
+            title: title.to_owned(),
+            generation: 1,
+            execution: ExecutionState::NotExecuted,
+            items: Rc::new(Vec::new()),
+            queue: Vec::new(),
+            permission: SessionPermissionPolicy::AskEachTime,
+            models: Vec::new(),
+            initial_model: None,
+            stats: StatsInput::default(),
+            subagents: Vec::new(),
+        }
+    }
+
+    fn prototype() -> WorkbenchProjection {
+        let mut deployment = session("h-local", "p-local-atlas", "w-atlas", "s5", "更新部署手册");
+        deployment.subagents = vec![
+            SubagentProjection {
+                key: SubagentKey::new(deployment.key.clone(), "child-running"),
+                title: "检查部署环境".to_owned(),
+                continuable: true,
+            },
+            SubagentProjection {
+                key: SubagentKey::new(deployment.key.clone(), "child-complete"),
+                title: "核对文档链接".to_owned(),
+                continuable: false,
+            },
+        ];
+        WorkbenchProjection {
+            connection: ConnectionState::Online,
+            sessions: vec![
+                session(
+                    "h-local",
+                    "p-local-metis",
+                    "w-main",
+                    "s1",
+                    "修复重连后的旧审批",
+                ),
+                session(
+                    "h-local",
+                    "p-local-metis",
+                    "w-main",
+                    "s2",
+                    "补充重连回归测试",
+                ),
+                session(
+                    "h-build",
+                    "p-build-metis",
+                    "w-release",
+                    "s4",
+                    "打包 portable host",
+                ),
+                deployment,
+                session("h-local", "p-local-atlas", "w-atlas", "s6", "检查文档链接"),
+                session(
+                    "h-local",
+                    "p-local-atlas",
+                    "w-review",
+                    "s3",
+                    "审查差异提示文案",
+                ),
+            ],
+        }
+    }
+
+    fn project_key(host: &str, project: &str) -> ProjectKey {
+        ProjectKey::new(host, project)
+    }
+
+    fn worktree_key(host: &str, project: &str, worktree: &str) -> WorktreeKey {
+        WorktreeKey::new(project_key(host, project), worktree)
+    }
+
+    fn worktree_id(host: &str, project: &str, worktree: &str) -> String {
+        logical_id("worktree", &[host, project, worktree])
+    }
+
+    fn ids(items: &[TreeItem]) -> Vec<String> {
+        items.iter().map(|item| item.id.to_string()).collect()
+    }
+
+    fn project<'a>(roots: &'a [TreeItem], host: &str, project: &str) -> &'a TreeItem {
+        let host_id = logical_id("host", &[host]);
+        let project_id = logical_id("project", &[host, project]);
+        roots
+            .iter()
+            .find(|item| item.id.as_str() == host_id)
+            .and_then(|host| {
+                host.children
+                    .iter()
+                    .find(|item| item.id.as_str() == project_id)
+            })
+            .unwrap_or_else(|| panic!("missing {host}/{project}"))
+    }
+
+    fn child<'a>(item: &'a TreeItem, id: &str) -> &'a TreeItem {
+        item.children
+            .iter()
+            .find(|item| item.id.as_str() == id)
+            .unwrap_or_else(|| panic!("missing child {id}"))
+    }
+
+    #[test]
+    fn prototype_flattens_single_worktrees_and_reveals_only_the_selected_path() {
+        let projection = prototype();
+        let selected = projection
+            .sessions
+            .iter()
+            .find(|session| session.key.session_id == "s3")
+            .expect("s3")
+            .key
+            .clone();
+        let mut projects = BTreeSet::new();
+        let mut worktrees = BTreeSet::new();
+        reveal_session(&selected, &mut projects, &mut worktrees);
+
+        assert_eq!(
+            projects,
+            BTreeSet::from([project_key("h-local", "p-local-atlas")])
+        );
+        assert_eq!(
+            worktrees,
+            BTreeSet::from([worktree_key("h-local", "p-local-atlas", "w-review")])
+        );
+
+        let (roots, targets, expansion_targets) =
+            build_items(&projection, &projects, &worktrees, &BTreeSet::new());
+        assert_eq!(roots.len(), 2, "the fixture has two distinct Hosts");
+        assert_eq!(targets.len(), 6, "subagents are not domain Sessions");
+
+        let metis = project(&roots, "h-local", "p-local-metis");
+        assert!(!metis.is_expanded());
+        assert_eq!(
+            ids(&metis.children),
+            vec![
+                session_id(&projection.sessions[0].key),
+                session_id(&projection.sessions[1].key)
+            ],
+            "a single Worktree is flattened into its Project"
+        );
+        assert!(!expansion_targets.contains_key(&worktree_id(
+            "h-local",
+            "p-local-metis",
+            "w-main"
+        )));
+        let build = project(&roots, "h-build", "p-build-metis");
+        assert_eq!(
+            ids(&build.children),
+            vec![session_id(&projection.sessions[2].key)]
+        );
+
+        let atlas = project(&roots, "h-local", "p-local-atlas");
+        assert!(atlas.is_expanded());
+        assert_eq!(
+            ids(&atlas.children),
+            vec![
+                worktree_id("h-local", "p-local-atlas", "w-atlas"),
+                worktree_id("h-local", "p-local-atlas", "w-review"),
+            ]
+        );
+        assert!(!child(atlas, &worktree_id("h-local", "p-local-atlas", "w-atlas")).is_expanded());
+        assert!(child(atlas, &worktree_id("h-local", "p-local-atlas", "w-review")).is_expanded());
+    }
+
+    #[test]
+    fn revealing_sessions_preserves_independent_project_worktree_and_subagent_expansion() {
+        let projection = prototype();
+        let selected = |id: &str| {
+            projection
+                .sessions
+                .iter()
+                .find(|session| session.key.session_id == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+                .key
+                .clone()
+        };
+        let mut projects = BTreeSet::new();
+        let mut worktrees = BTreeSet::new();
+        for id in ["s3", "s1", "s5"] {
+            reveal_session(&selected(id), &mut projects, &mut worktrees);
+        }
+        let subagents = BTreeSet::from([selected("s5")]);
+
+        assert_eq!(
+            projects,
+            BTreeSet::from([
+                project_key("h-local", "p-local-atlas"),
+                project_key("h-local", "p-local-metis"),
+            ])
+        );
+        assert_eq!(
+            worktrees,
+            BTreeSet::from([
+                worktree_key("h-local", "p-local-atlas", "w-atlas"),
+                worktree_key("h-local", "p-local-atlas", "w-review"),
+                worktree_key("h-local", "p-local-metis", "w-main"),
+            ]),
+            "revealing a Session must not collapse another Worktree"
+        );
+
+        projects.remove(&project_key("h-local", "p-local-atlas"));
+        let (roots, _, _) = build_items(&projection, &projects, &worktrees, &subagents);
+        let atlas = project(&roots, "h-local", "p-local-atlas");
+        assert!(!atlas.is_expanded());
+        let main = child(atlas, &worktree_id("h-local", "p-local-atlas", "w-atlas"));
+        let review = child(atlas, &worktree_id("h-local", "p-local-atlas", "w-review"));
+        assert!(main.is_expanded(), "Project collapse hides, not resets");
+        assert!(review.is_expanded(), "Project collapse hides, not resets");
+        assert!(
+            child(main, &session_id(&selected("s5"))).is_expanded(),
+            "Subagent expansion is independent of both ancestor sets"
+        );
+    }
 }

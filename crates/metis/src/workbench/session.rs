@@ -457,6 +457,9 @@ impl Workbench {
         if !controller.open_session(session, &projection) {
             return;
         }
+        self.navigation.update(cx, |navigation, cx| {
+            navigation.select_session(&self.projection, &projection.key, cx);
+        });
         if let Some(timeline) = &self.timeline {
             timeline.update(cx, |timeline, cx| {
                 timeline.set_session(&projection, cx);
@@ -583,6 +586,7 @@ impl Workbench {
                 composer.apply_local_queues(&mut projection, cx);
             });
         }
+        let previous_session = self.current_projection().map(|session| session.key.clone());
         self.projection = projection;
         let live = self
             .projection
@@ -603,8 +607,14 @@ impl Workbench {
                 self.controller = Some(MainViewController::new(first, snapshot));
             }
             let selected = self.current_projection().map(|session| session.key.clone());
+            let reveal_selected = selected != previous_session;
             self.navigation.update(cx, |navigation, cx| {
-                navigation.replace_projection(&self.projection, selected.as_ref(), cx);
+                navigation.replace_projection(
+                    &self.projection,
+                    selected.as_ref(),
+                    reveal_selected,
+                    cx,
+                );
             });
             if let Some(projection) = self.current_projection().cloned() {
                 let connection = self.projection.connection;
@@ -636,7 +646,7 @@ impl Workbench {
         }
         self.navigation.update(cx, |navigation, cx| {
             if live.is_empty() {
-                navigation.replace_projection(&self.projection, None, cx);
+                navigation.replace_projection(&self.projection, None, false, cx);
             }
         });
         if self.controller.is_some() {

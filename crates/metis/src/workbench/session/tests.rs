@@ -4,7 +4,7 @@ use gpui_kit::{
     Bounds, Entity, Focusable as _, Point, TestAppContext, VisualTestContext, WindowBounds,
     WindowHandle, WindowOptions,
     base::{Root, test_support},
-    component::{Theme, ThemeMode},
+    component::{Theme, ThemeMode, tree::TreeItem},
     px, size,
     test::TestWindowExt as _,
 };
@@ -97,6 +97,22 @@ fn session_projection(id: &str) -> SessionProjection {
             }),
         },
         subagents: Vec::new(),
+    }
+}
+
+fn rehome(session: &mut SessionProjection, project: &str, worktree: &str) {
+    let key = SessionKey::new(
+        WorktreeKey::new(ProjectKey::new("host", project), worktree),
+        session.key.session_id.clone(),
+    );
+    session.key = key.clone();
+    for item in Rc::make_mut(&mut session.items).iter_mut() {
+        if let TimelineItem::Tool(call) = item {
+            call.key = ToolCallKey::new(key.clone(), call.key.call_id.clone());
+        }
+    }
+    for subagent in &mut session.subagents {
+        subagent.key.parent = key.clone();
     }
 }
 
@@ -1293,6 +1309,76 @@ fn session_switch_restores_each_sessions_draft_selection_and_input_entity(cx: &m
         restored.read_with(&cx, |input, _| input.selected_range()),
         1..5
     );
+}
+
+#[gpui_kit::test]
+fn native_navigation_reveal_and_refresh_preserve_manual_collapse(cx: &mut TestAppContext) {
+    let mut projection = preview();
+    let mut deployment = session_projection("deployment");
+    rehome(&mut deployment, "atlas", "main");
+    let mut review = session_projection("review");
+    rehome(&mut review, "atlas", "review");
+    let review_key = review.key.clone();
+    projection.sessions.extend([deployment, review]);
+    let review_id = session_id(&review_key);
+    let atlas_id = logical_id("project", &["host", "atlas"]);
+
+    let (handle, view, _) = open_preview(cx, projection.clone());
+    let mut cx = visual(handle, cx);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_session(review_key, window, cx);
+        });
+    });
+    settle(&mut cx);
+
+    let tree = view.read_with(&cx, |view, cx| view.navigation.read(cx).tree_state(cx));
+    let review_item = TreeItem::new(review_id.clone(), "");
+    let atlas_item = TreeItem::new(atlas_id.clone(), "");
+    tree.read_with(&cx, |tree, _| {
+        assert!(tree.index_of(&review_item.id).is_some());
+        assert_eq!(
+            tree.selected_item().map(|item| item.id.to_string()),
+            Some(review_id)
+        );
+    });
+
+    cx.update(|window, cx| {
+        tree.update(cx, |tree, cx| {
+            tree.set_selected_item(Some(&atlas_item), cx);
+            tree.focus(window, cx);
+        });
+        window.dispatch_action(
+            Box::new(gpui_kit::base::actions::Confirm { secondary: false }),
+            cx,
+        );
+    });
+    settle(&mut cx);
+    tree.read_with(&cx, |tree, _| {
+        assert!(tree.index_of(&review_item.id).is_none());
+        let atlas = tree
+            .entry(
+                tree.index_of(&atlas_item.id)
+                    .expect("visible atlas Project"),
+            )
+            .expect("atlas entry");
+        assert!(!atlas.is_expanded());
+    });
+
+    replace(&mut cx, &view, projection);
+    tree.read_with(&cx, |tree, _| {
+        assert!(
+            tree.index_of(&review_item.id).is_none(),
+            "a background refresh must not reopen the manually collapsed Project"
+        );
+        let atlas = tree
+            .entry(
+                tree.index_of(&atlas_item.id)
+                    .expect("visible atlas Project"),
+            )
+            .expect("atlas entry");
+        assert!(!atlas.is_expanded());
+    });
 }
 
 #[path = "review_tests.rs"]
