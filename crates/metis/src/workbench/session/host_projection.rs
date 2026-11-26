@@ -23,7 +23,6 @@ const LIVE_APPROVAL_LIMIT: usize = 64;
 
 /// One Session's bounded visible projection plus the approval requests
 /// answerable by the current `$events` generation.
-#[allow(dead_code)] // The product entry remains offline until its async Host owner is wired.
 pub(super) struct HostSessionReducer {
     key: SessionKey,
     client_id: String,
@@ -34,7 +33,6 @@ pub(super) struct HostSessionReducer {
     approval_overflow: bool,
 }
 
-#[allow(dead_code)] // The product entry remains offline until its async Host owner is wired.
 impl HostSessionReducer {
     pub(super) fn new(key: SessionKey, generation: u64, client_id: impl Into<String>) -> Self {
         let title = key.session_id.clone();
@@ -155,6 +153,12 @@ impl HostSessionReducer {
         self.live_approvals.clear();
         self.approval_overflow = false;
         self.recompute_approvals();
+    }
+
+    /// Opaque id of the current `$events` generation; the bridge derives
+    /// caller-owned prompt request ids from it.
+    pub(super) fn client_id(&self) -> &str {
+        &self.client_id
     }
 
     pub(super) fn projection(&self) -> SessionProjection {

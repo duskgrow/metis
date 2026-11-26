@@ -1,6 +1,7 @@
 //! Minimal native Session slice with injected projections and honest effects.
 
 mod composer;
+mod host_bridge;
 mod host_projection;
 mod navigation;
 mod timeline;
@@ -203,7 +204,6 @@ pub(super) enum SessionIntent {
 /// locally or could not be delivered; neither variant is Host acceptance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum EffectResult {
-    #[cfg(test)]
     Recorded,
     Unavailable,
 }

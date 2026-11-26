@@ -9,10 +9,11 @@
 - 纯行为与本地状态：[`identity.rs`](../crates/metis/src/workbench/identity.rs)、[`stats.rs`](../crates/metis/src/workbench/stats.rs)、[`history.rs`](../crates/metis/src/workbench/history.rs)、[`focus.rs`](../crates/metis/src/workbench/focus.rs)。
 - 主题与基础适配：[`theme.rs`](../crates/metis/src/workbench/theme.rs)、[`markdown.rs`](../crates/metis/src/workbench/markdown.rs)、[`disclosure.rs`](../crates/metis/src/workbench/disclosure.rs)。
 - 原生 Session 纵切：[`session.rs`](../crates/metis/src/workbench/session.rs)及其 `session/` 子模块；Host 快照与有序事件的纯适配位于 [`host_projection.rs`](../crates/metis/src/workbench/session/host_projection.rs)，交互覆盖从 [Session 测试](../crates/metis/src/workbench/session/tests.rs)和 [review 测试](../crates/metis/src/workbench/session/review_tests.rs)进入。
+- Host 接入：异步传输 owner 位于 [`session_transport.rs`](../crates/metis/src/session_transport.rs)，负责连接、follow 与 `$events` 原样转发和 prompt/审批命令；UI 线程桥接位于 [`host_bridge.rs`](../crates/metis/src/workbench/session/host_bridge.rs)，把事件喂入 reducer 生成投影并给出生产 effect。真实 Host 提示词与审批闭环见 [`session_transport.rs` 集成测试](../crates/metis/tests/session_transport.rs)。
 
-[产品入口](../crates/metis/src/main.rs)只创建离线 `Workbench`，显示真实 Offline 空状态；交互 preview 仅由测试注入投影和 effect，不是产品运行模式。Host 纯投影适配器复用 `SessionJournal` 校验顺序并保留原始审批请求，但异步连接 owner、生产 effect 和产品入口尚未接入它。`FocusTopology` 的方向移动只有纯模型，未绑定产品键位；Diff 与只读 Subagent 仍只有纯历史／归属模型和来源返回壳，不是完整原生 UI。
+[产品入口](../crates/metis/src/main.rs)只创建离线 `Workbench`，显示真实 Offline 空状态；交互 preview 仅由测试注入投影和 effect，不是产品运行模式。Host 纯投影适配器复用 `SessionJournal` 校验顺序并保留原始审批请求；`SessionTransport` 拥有异步连接，`HostSessionBridge` 生成投影并提供生产 effect，Send/Queue 目前只提交提示词文本，模型与 effort 选择、Queue 的 Host 语义和断线自动重连尚未实现，产品入口也尚未接入桥接。`FocusTopology` 的方向移动只有纯模型，未绑定产品键位；Diff 与只读 Subagent 仍只有纯历史／归属模型和来源返回壳，不是完整原生 UI。
 
-已有纯行为测试、Session 测试和组件 headless probes 通过，具体覆盖以测试代码为准。这些证据不代表 Workbench 已接入真实 Host，也不覆盖完整 Diff/Subagent UI、Queue 的真实 Host 提交或完整冷启动；高对比、200% 缩放、真实 IME、真实辅助技术、性能与完整原生视觉验收仍未完成。本文继续是 Draft 工程契约，局部落地不自动晋升 Stable。
+已有纯行为测试、Session 测试、组件 headless probes 和传输层真实 Host 集成测试通过，具体覆盖以测试代码为准。这些证据不代表 Workbench 产品流程已接入真实 Host，也不覆盖完整 Diff/Subagent UI、Queue 的真实 Host 提交或完整冷启动；高对比、200% 缩放、真实 IME、真实辅助技术、性能与完整原生视觉验收仍未完成。本文继续是 Draft 工程契约，局部落地不自动晋升 Stable。
 
 ## 1. 规范来源与冲突处理
 

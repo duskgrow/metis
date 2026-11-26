@@ -47,11 +47,11 @@ Metis 让个人用户在一个工作台中操作多台主机上的智能体，�
 
 **当前状态与交付顺序**
 
-当前切片已完成纯行为模型、Light/Dark 主题写路径、Markdown 安全适配、Disclosure、Session headless 纵切、未绑定产品键位的 `FocusTopology`，以及 Host 快照与有序事件的纯投影适配；已有行为测试、headless probes 和局部 Session 真实帧审查通过。原型固化收尾已完成，但这些局部成果不代表完整原生流程已经接通。
+当前切片已完成纯行为模型、Light/Dark 主题写路径、Markdown 安全适配、Disclosure、Session headless 纵切、未绑定产品键位的 `FocusTopology`、Host 快照与有序事件的纯投影适配，以及 Host 异步传输与 UI 线程桥接；已有行为测试、headless probes、局部 Session 真实帧审查和真实 Host 提示词／审批闭环集成测试通过。原型固化收尾已完成，但这些局部成果不代表完整原生流程已经接通。
 
 [Workbench 产品入口](../crates/metis/src/main.rs)只创建诚实的 Offline 空状态，不连接 Host 或模拟 Session 执行；交互 preview 只由 [Session 测试](../crates/metis/src/workbench/session/tests.rs)注入投影和 effect，不是产品运行模式。
 
-下一阶段是接入真实 Host，随后完成 Diff/Subagent 与 Queue 流程、打通完整冷启动，最后进行 OS/性能验收。工程接手入口、保留偏差和验证边界由上文组件契约持有。
+下一阶段是把 Host 桥接接入产品入口并打通完整冷启动，随后完成 Diff/Subagent 原生 UI、Queue 的真实 Host 提交和模型选择，最后进行 OS/性能验收。工程接手入口、保留偏差和验证边界由上文组件契约持有。
 
 **设计准备**
 

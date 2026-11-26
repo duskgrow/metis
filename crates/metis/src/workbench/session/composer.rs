@@ -524,7 +524,6 @@ impl Composer {
             generation: self.generation,
         });
         self.feedback = Some(match result {
-            #[cfg(test)]
             EffectResult::Recorded => {
                 "Approval intent recorded locally; Host acceptance and execution remain unknown."
                     .to_owned()
@@ -598,7 +597,6 @@ impl Composer {
         };
         let result = (self.effects.borrow_mut())(intent);
         let recorded = match result {
-            #[cfg(test)]
             EffectResult::Recorded => true,
             EffectResult::Unavailable => false,
         };
