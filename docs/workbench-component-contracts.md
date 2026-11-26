@@ -8,9 +8,9 @@
 
 - 纯行为与本地状态：[`identity.rs`](../crates/metis/src/workbench/identity.rs)、[`stats.rs`](../crates/metis/src/workbench/stats.rs)、[`history.rs`](../crates/metis/src/workbench/history.rs)、[`focus.rs`](../crates/metis/src/workbench/focus.rs)。
 - 主题与基础适配：[`theme.rs`](../crates/metis/src/workbench/theme.rs)、[`markdown.rs`](../crates/metis/src/workbench/markdown.rs)、[`disclosure.rs`](../crates/metis/src/workbench/disclosure.rs)。
-- 原生 Session 纵切：[`session.rs`](../crates/metis/src/workbench/session.rs)及其 `session/` 子模块；交互覆盖从 [Session 测试](../crates/metis/src/workbench/session/tests.rs)和 [review 测试](../crates/metis/src/workbench/session/review_tests.rs)进入。
+- 原生 Session 纵切：[`session.rs`](../crates/metis/src/workbench/session.rs)及其 `session/` 子模块；Host 快照与有序事件的纯适配位于 [`host_projection.rs`](../crates/metis/src/workbench/session/host_projection.rs)，交互覆盖从 [Session 测试](../crates/metis/src/workbench/session/tests.rs)和 [review 测试](../crates/metis/src/workbench/session/review_tests.rs)进入。
 
-[产品入口](../crates/metis/src/main.rs)只创建离线 `Workbench`，显示真实 Offline 空状态；交互 preview 仅由测试注入投影和 effect，不是产品运行模式。`FocusTopology` 的方向移动只有纯模型，未绑定产品键位；Diff 与只读 Subagent 仍只有纯历史／归属模型和来源返回壳，不是完整原生 UI。
+[产品入口](../crates/metis/src/main.rs)只创建离线 `Workbench`，显示真实 Offline 空状态；交互 preview 仅由测试注入投影和 effect，不是产品运行模式。Host 纯投影适配器复用 `SessionJournal` 校验顺序并保留原始审批请求，但异步连接 owner、生产 effect 和产品入口尚未接入它。`FocusTopology` 的方向移动只有纯模型，未绑定产品键位；Diff 与只读 Subagent 仍只有纯历史／归属模型和来源返回壳，不是完整原生 UI。
 
 已有纯行为测试、Session 测试和组件 headless probes 通过，具体覆盖以测试代码为准。这些证据不代表 Workbench 已接入真实 Host，也不覆盖完整 Diff/Subagent UI、Queue 的真实 Host 提交或完整冷启动；高对比、200% 缩放、真实 IME、真实辅助技术、性能与完整原生视觉验收仍未完成。本文继续是 Draft 工程契约，局部落地不自动晋升 Stable。
 
@@ -94,6 +94,8 @@ Diff 与只读 Subagent 当前只有纯历史/归属模型和来源返回壳，�
 - `SessionPermissionPolicy::AskEachTime` 和 `AllowOnce` 必须映射到体验正本指定的 Session 与 `ToolCallKey` 作用域，原生视图不得另存一份授权正本；提交前校验 Session/call 归属、当前 Host/Event 代际和审批有效性，旧回答在断连、重连、被取代或其他客户端已决定后不得继续提交。
 - Offline/Cached、Stale、Unknown 和 Not replayed 按体验正本投影为不同事实；Host 未确认执行结果时保持 `Execution: Unknown`，不由连接或本地重放行为推断执行结果。
 
+纯 Host 适配器以完整校验后的快照和连续事件原子更新投影；重连快照只重建一次，live append 增量应用，保留的 Timeline 窗口有界。持久 `approval/asked` 与当前 `$events` 代际的唯一匹配请求同时存在时才允许回答；取消、决定、断代、实时候选歧义或容量溢出均失败关闭。由于 `$events.event_id` 不是 durable approval ID，同一 ToolCall 多个 durable 审批代际的未决请求保持 Stale，不按 `callId` 猜测请求的新旧；已确认决定仍按 outcome 投影。`cancelled`/`unavailable` 不映射成用户拒绝，`TOOL_NOT_STARTED`/`TOOL_OUTCOME_UNKNOWN` 也不映射成执行失败。无 `callId` 的 Host 审批、流式 Assistant chunk、历史分页与淘汰后恢复、Model/Effort、统计和 Host Queue 尚未形成产品投影。
+
 ### 5.3 Composer 原生连续状态
 
 - 每个 Session 的原生 Textarea/MessageScroller 唯一持有并恢复 draft、selection 与 scroll；Send intent 仅被本地记录时保留 draft，Queue item 已在本地保存文本后可清空 Composer draft。Send/Queue 可用性遵循体验正本。
@@ -134,8 +136,9 @@ Activity 只描述完整 Session 的执行活动与耗时；Usage 只描述 toke
 - **三域统计**：独立数据域、隐藏规则、公式与格式边界，详见 [`stats.rs`](../crates/metis/src/workbench/stats.rs)。
 - **历史与归属**：Diff/Subagent 的来源恢复、Back/Forward、独立审查事实和只读约束，详见 [`history.rs`](../crates/metis/src/workbench/history.rs)。
 - **方向焦点**：区域顺序、动态区域、Overlay scope 与历史锚点恢复，详见 [`focus.rs`](../crates/metis/src/workbench/focus.rs)。
+- **Host 投影**：真实协议形状的快照、连续事件、重连窗口、Surface 替换、审批代际与歧义、恢复错误码和有界 Timeline，详见 [`host_projection.rs`](../crates/metis/src/workbench/session/host_projection.rs)。
 
-这些结果只证明本地模型行为，不证明真实 Host 提交或原生交互。
+这些结果只证明本地模型行为，不证明真实 Host 提交或原生交互。Host 投影测试也不证明产品入口已订阅 Host，或已完成分页、淘汰恢复和性能验收；仍需异步 owner、生产 effect、headless 集成和真实 Host/OS 验收。
 
 ### 7.2 组件 probe 与原生验收状态
 

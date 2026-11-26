@@ -1,6 +1,7 @@
 //! Minimal native Session slice with injected projections and honest effects.
 
 mod composer;
+mod host_projection;
 mod navigation;
 mod timeline;
 

@@ -132,6 +132,7 @@ pub struct Project {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalRequest {
     pub client_id: String,
+    /// Opaque correlation ID delivered at most once within this client generation.
     pub event_id: String,
     pub agent_id: String,
     /// Original Host approval request after transport-only Agent/signal removal.

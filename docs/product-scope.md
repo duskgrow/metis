@@ -47,7 +47,7 @@ Metis 让个人用户在一个工作台中操作多台主机上的智能体，�
 
 **当前状态与交付顺序**
 
-当前切片已完成纯行为模型、Light/Dark 主题写路径、Markdown 安全适配、Disclosure、Session headless 纵切，以及未绑定产品键位的 `FocusTopology`；已有行为测试、headless probes 和局部 Session 真实帧审查通过。原型固化收尾已完成，但这些局部成果不代表完整原生流程已经接通。
+当前切片已完成纯行为模型、Light/Dark 主题写路径、Markdown 安全适配、Disclosure、Session headless 纵切、未绑定产品键位的 `FocusTopology`，以及 Host 快照与有序事件的纯投影适配；已有行为测试、headless probes 和局部 Session 真实帧审查通过。原型固化收尾已完成，但这些局部成果不代表完整原生流程已经接通。
 
 [Workbench 产品入口](../crates/metis/src/main.rs)只创建诚实的 Offline 空状态，不连接 Host 或模拟 Session 执行；交互 preview 只由 [Session 测试](../crates/metis/src/workbench/session/tests.rs)注入投影和 effect，不是产品运行模式。
 
