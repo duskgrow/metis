@@ -742,6 +742,59 @@ fn queue_cancel_removes_only_target_item_and_preserves_other_sessions(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn queue_cancel_non_last_focuses_next_surviving_item(cx: &mut TestAppContext) {
+    let mut projection = preview();
+    projection.sessions[0].queue = vec![
+        QueueItemProjection {
+            id: "q1".to_owned(),
+            text: "排队：第一项".to_owned(),
+        },
+        QueueItemProjection {
+            id: "q2".to_owned(),
+            text: "排队：第二项".to_owned(),
+        },
+        QueueItemProjection {
+            id: "q3".to_owned(),
+            text: "排队：第三项".to_owned(),
+        },
+        QueueItemProjection {
+            id: "q4".to_owned(),
+            text: "排队：第四项".to_owned(),
+        },
+    ];
+    let (handle, view, intents) = open_preview(cx, projection);
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    let retained = queue_input(&view, &cx, "q3").entity_id();
+    scroll_composer(&mut cx, 1000.);
+    cx.update(|window, cx| window.click("queue-cancel:q2", cx));
+    settle(&mut cx);
+
+    let queue = view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().queue.clone()
+    });
+    assert_eq!(
+        queue
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["q1", "q3", "q4"]
+    );
+    assert_eq!(queue_input(&view, &cx, "q3").entity_id(), retained);
+    assert_eq!(
+        view.read_with(&cx, |view, _| {
+            view.controller.as_ref().unwrap().navigation.focus().clone()
+        }),
+        FocusAnchor::new(MainView::Session(session("one")), Region::Queue).with_item("q3")
+    );
+    cx.update(|window, cx| {
+        let input = queue_input(&view, cx, "q3");
+        assert!(input.read(cx).focus_handle(cx).is_focused(window));
+    });
+    assert!(intents.borrow().is_empty(), "cancelling Queue is local");
+}
+
+#[gpui_kit::test]
 fn approval_completion_does_not_replay_queue_or_append_messages(cx: &mut TestAppContext) {
     let (handle, view, intents) = open_preview(cx, queued_preview());
     let mut cx = visual(handle, cx);
