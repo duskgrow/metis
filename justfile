@@ -75,6 +75,10 @@ native-editor-smoke:
 native-editor-smoke-ubuntu:
     node scripts/smoke-native-editor-ubuntu.mjs
 
+# Run opt-in Workbench performance acceptance on the preregistered reference runner
+perf-workbench:
+    cargo nextest run --release -p metis --test workbench_performance --run-ignored all -j 1
+
 # Build docs (rustdoc warnings are errors; RUSTDOCFLAGS injected at the top of this file)
 doc:
     cargo doc --no-deps --workspace

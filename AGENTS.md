@@ -12,6 +12,7 @@
 - New crate: `just new-crate <name>`
 - Dependency policy: `just deny`; docs build: `just doc`; release-artifact drift check: `just dist-check`; agent-doc smoke check: `just agent-check`
 - Headless package / extracted-archive smoke: `just headless-package` / `just headless-smoke`
+- Opt-in Workbench performance acceptance: `just perf-workbench` (release, single-thread; not part of `just ci`)
 - Toolchain bump: `just toolchain-bump` (also run weekly by CI, which opens a validated PR)
 
 ## Environment

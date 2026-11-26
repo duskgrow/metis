@@ -10,10 +10,12 @@ consistent daily decisions without turning every small change into a design
 project.
 
 Canonical product rules live in
-[Workbench experience](../../../docs/workbench-experience.md). Dated evidence lives
-in the [UI/UX research](../../../docs/research/workbench-uiux.md); do not copy the
-research into new documents. GPUI dependency boundaries remain governed by
-ADR-0006.
+[Workbench experience](../../../docs/workbench-experience.md). Native verification
+and visual-evidence boundaries live in the
+[Workbench component contracts](../../../docs/workbench-component-contracts.md).
+Dated evidence lives in the [UI/UX research](../../../docs/research/workbench-uiux.md);
+do not copy the research into new documents. GPUI dependency boundaries remain
+governed by ADR-0006.
 
 ## 1. Classify once (use the highest applicable level)
 
