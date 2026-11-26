@@ -1,10 +1,12 @@
 //! Controlled disclosure with a stable, keyboard-focusable native summary.
 
 use gpui_kit::{
-    AnyElement, App, FocusHandle, Window,
-    component::{button::Button, collapsible::Collapsible},
+    AnyElement, App, BoxShadow, FocusHandle, Point, Window,
+    base::Button,
+    component::{ActiveTheme as _, collapsible::Collapsible},
     div,
     prelude::*,
+    px,
 };
 
 type ToggleHandler = Box<dyn Fn(bool, &mut Window, &mut App)>;
@@ -51,15 +53,40 @@ impl Disclosure {
 }
 
 impl RenderOnce for Disclosure {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let open = self.open;
         let on_toggle = self.on_toggle;
+        let selection = cx.theme().selection;
+        let ring = cx.theme().ring;
         Collapsible::new()
             .open(open)
             .child(
                 Button::new(format!("{}-summary", self.id))
                     .track_focus(&self.focus)
-                    .children(self.summary)
+                    .aria_expanded(open)
+                    .justify_start()
+                    .rounded_md()
+                    .p_1()
+                    .hover(move |style| style.bg(selection))
+                    .focus_visible(move |style| {
+                        let mut style = style.bg(selection);
+                        style.box_shadow.get_or_insert_default().push(BoxShadow {
+                            color: ring,
+                            offset: Point::default(),
+                            blur_radius: px(0.),
+                            spread_radius: px(2.),
+                            inset: false,
+                        });
+                        style
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .child(if open { "▾" } else { "▸" })
+                            .children(self.summary),
+                    )
                     .on_click(move |_, window, cx| {
                         if let Some(on_toggle) = &on_toggle {
                             on_toggle(!open, window, cx);

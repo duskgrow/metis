@@ -20,8 +20,8 @@ use gpui_kit::{
 };
 
 use super::{
-    ApprovalDecision, ApprovalState, FocusAnchor, MainView, Region, ResolvedTokens, SessionKey,
-    SessionProjection, TimelineItem, ToolCallProjection, Workbench, session_id,
+    ApprovalDecision, ApprovalState, ExecutionState, FocusAnchor, MainView, Region, ResolvedTokens,
+    SessionKey, SessionProjection, TimelineItem, ToolCallProjection, Workbench, session_id,
 };
 use crate::workbench::markdown::{AgentMarkdown, LinkConfirmation};
 
@@ -250,6 +250,31 @@ impl SessionTimeline {
         cx.notify();
     }
 
+    pub(super) fn reveal_tool(
+        &mut self,
+        call_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(state) = self.states.get_mut(&self.session) else {
+            return false;
+        };
+        let stable_id = format!("tool:{call_id}");
+        let Some(index) = state.item_ids.iter().position(|id| id == &stable_id) else {
+            return false;
+        };
+        let Some(focus) = state.tool_focus.get(call_id).cloned() else {
+            return false;
+        };
+        state.open_tools.insert(call_id.to_owned());
+        state.scroller.update(cx, |scroller, cx| {
+            scroller.scroll_to_item(index, cx);
+        });
+        focus.focus(window, cx);
+        cx.notify();
+        true
+    }
+
     fn toggle_tool(&mut self, call_id: &str, open: bool, cx: &mut Context<Self>) {
         let anchor = FocusAnchor::new(MainView::Session(self.session.clone()), Region::Timeline)
             .with_item(call_id.to_owned());
@@ -367,8 +392,10 @@ fn render_item(
                     .test_support()
                     .max_w(relative(0.8))
                     .rounded_lg()
-                    .bg(tokens.metis.code_surface)
-                    .p_3()
+                    .bg(tokens.projected.selection)
+                    .text_color(tokens.projected.foreground)
+                    .px_3()
+                    .py_2()
                     .child(Label::new(text)),
             )
             .into_any_element(),
@@ -426,32 +453,53 @@ impl RenderOnce for ToolCallView {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let call = self.call;
         let call_id = call.key.call_id.clone();
-        let approval_label = match call.approval {
-            ApprovalState::NotRequested => None,
-            ApprovalState::Pending => Some("Approval pending"),
-            ApprovalState::Submitting => Some("Approval submitting"),
-            ApprovalState::Decided(ApprovalDecision::AllowOnce) => Some("Allowed once"),
-            ApprovalState::Decided(ApprovalDecision::Reject) => Some("Rejected"),
-            ApprovalState::Stale => Some("Approval stale"),
+        let execution_label = match call.execution {
+            ExecutionState::NotExecuted | ExecutionState::Succeeded => None,
+            ExecutionState::Running => Some("Running"),
+            ExecutionState::Failed => Some("Failed"),
+            ExecutionState::Stopped => Some("Stopped"),
+            ExecutionState::Unknown => Some("Unknown"),
         };
-        let summary = format!(
-            "{} · {}{}",
-            call.title,
-            call.execution.label(),
-            approval_label.map_or(String::new(), |label| format!(" · {label}"))
+        let approval_label = match call.approval {
+            ApprovalState::NotRequested
+            | ApprovalState::Pending
+            | ApprovalState::Submitting
+            | ApprovalState::Decided(ApprovalDecision::AllowOnce) => None,
+            ApprovalState::Decided(ApprovalDecision::Reject) => Some("Rejected"),
+            ApprovalState::Stale => Some("Stale"),
+        };
+        let summary = [execution_label, approval_label]
+            .into_iter()
+            .flatten()
+            .fold(
+                format!("{} {}", call.title, call.arguments),
+                |summary, label| format!("{summary} · {label}"),
+            );
+        let output = Label::new(
+            call.output
+                .map_or("No output reported.".to_owned(), |output| {
+                    format!("Output\n{output}")
+                }),
         );
         let body = div()
             .flex_col()
             .gap_2()
             .p_2()
             .bg(self.tokens.metis.code_surface)
-            .child(format!("Arguments\n{}", call.arguments))
-            .child(Label::new(
-                call.output
-                    .map_or("No output reported.".to_owned(), |output| {
-                        format!("Output\n{output}")
-                    }),
-            ));
+            .text_color(self.tokens.metis.foreground_secondary)
+            .text_size(self.tokens.projected.mono_font_size)
+            .when(
+                matches!(
+                    call.approval,
+                    ApprovalState::Pending | ApprovalState::Submitting | ApprovalState::Stale
+                ),
+                |body| {
+                    body.child(format!("Arguments\n{}", call.arguments))
+                        .children(call.cwd.clone().map(|cwd| Label::new(format!("cwd {cwd}"))))
+                        .children(call.reason.clone().map(Label::new))
+                },
+            )
+            .child(output);
         let disclosure = super::super::disclosure::Disclosure::new(
             format!("tool-{call_id}"),
             self.open,
@@ -463,7 +511,7 @@ impl RenderOnce for ToolCallView {
         div()
             .id(format!("tool-call-{call_id}"))
             .flex_col()
-            .border_1()
+            .border_l_1()
             .border_color(self.tokens.projected.border)
             .child(disclosure)
             .into_any_element()

@@ -8,7 +8,7 @@ use gpui_kit::{
     Subscription, WeakEntity, Window,
     base::{Disableable as _, TestSupportExt as _},
     component::{
-        button::Button,
+        button::{Button, ButtonVariants as _},
         input::{InputEvent, Textarea, TextareaState},
         label::Label,
         menu::DropdownMenu as _,
@@ -226,7 +226,7 @@ impl Composer {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 8)
-                .placeholder("Write a message")
+                .placeholder("给 Agent 发消息")
                 .default_value(draft)
         });
 
@@ -678,37 +678,85 @@ impl Render for Composer {
                 && matches!(call.approval, ApprovalState::Pending);
             let allow_call = call.key.clone();
             let reject_call = call.key.clone();
+            let source_call = call.key.clone();
+            let heading = if matches!(call.approval, ApprovalState::Submitting) {
+                "Approval for this tool call · Submitting"
+            } else {
+                "Approval for this tool call"
+            };
             div()
                 .id(format!("approval-dock-{call_id}"))
                 .test_support()
-                .flex_col()
+                .flex()
+                .items_start()
                 .gap_2()
-                .p_3()
-                .border_1()
-                .border_color(tokens.projected.border)
+                .py_2()
+                .border_t_1()
+                .border_color(tokens.metis.border_subtle)
                 .track_focus(&focus)
-                .child(Label::new("Approval for this tool call"))
-                .child(Label::new(format!(
-                    "{}\nArguments\n{}",
-                    call.title, call.arguments
-                )))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(tokens.projected.muted_foreground)
+                                .child(Label::new(heading)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_color(tokens.metis.foreground_secondary)
+                                        .child(Label::new(format!(
+                                            "{}\n{}",
+                                            call.title, call.arguments
+                                        ))),
+                                )
+                                .child(
+                                    Button::new(format!("approval-source-{call_id}"))
+                                        .ghost()
+                                        .label("View tool call")
+                                        .dropdown_caret(true)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if let Some(parent) = this.parent.upgrade() {
+                                                parent.update(cx, |parent, cx| {
+                                                    parent.reveal_tool_call(
+                                                        &source_call,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                        })),
+                                ),
+                        )
+                        .children(call.cwd.clone().map(|cwd| {
+                            div()
+                                .id(format!("approval-cwd-{call_id}"))
+                                .test_support()
+                                .text_color(tokens.projected.muted_foreground)
+                                .child(Label::new(format!("cwd {cwd}")))
+                        }))
+                        .children(call.reason.clone().map(|reason| {
+                            div()
+                                .id(format!("approval-reason-{call_id}"))
+                                .test_support()
+                                .text_color(tokens.metis.foreground_secondary)
+                                .child(Label::new(reason))
+                        })),
+                )
                 .child(
                     div()
                         .flex()
                         .gap_2()
-                        .child(
-                            Button::new(format!("approval-allow-{call_id}"))
-                                .label("Allow once")
-                                .disabled(!can_approve)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.decide(
-                                        allow_call.clone(),
-                                        ApprovalDecision::AllowOnce,
-                                        expected_generation,
-                                        cx,
-                                    );
-                                })),
-                        )
                         .child(
                             Button::new(format!("approval-reject-{call_id}"))
                                 .label("Reject")
@@ -721,6 +769,20 @@ impl Render for Composer {
                                         cx,
                                     );
                                 })),
+                        )
+                        .child(
+                            Button::new(format!("approval-allow-{call_id}"))
+                                .primary()
+                                .label("Allow once")
+                                .disabled(!can_approve)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.decide(
+                                        allow_call.clone(),
+                                        ApprovalDecision::AllowOnce,
+                                        expected_generation,
+                                        cx,
+                                    );
+                                })),
                         ),
                 )
         });
@@ -728,9 +790,9 @@ impl Render for Composer {
         div()
             .flex_col()
             .gap_2()
-            .p_3()
-            .border_t_1()
-            .border_color(tokens.projected.border)
+            .py_2()
+            .text_color(tokens.projected.foreground)
+            .text_size(tokens.metis.metadata_font_size)
             .on_action(cx.listener(|this, action: &SelectModel, _, cx| {
                 this.select_model(&action.0, cx);
             }))
@@ -754,13 +816,18 @@ impl Render for Composer {
                             .flex()
                             .items_start()
                             .gap_2()
+                            .p_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(tokens.projected.border)
+                            .bg(tokens.metis.code_surface)
                             .child(
                                 div()
                                     .id(format!("queue-editor:{item_id}"))
                                     .test_support()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(Textarea::new(&input).w_full()),
+                                    .child(Textarea::new(&input).w_full().bordered(false)),
                             )
                             .child(
                                 Button::new(format!("queue-cancel:{item_id}"))
@@ -773,37 +840,56 @@ impl Render for Composer {
             }))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(Label::new(match self.permission {
-                        SessionPermissionPolicy::AskEachTime => "Permission · Ask each time",
-                    }))
-                    .child(div().flex_1())
-                    .child(ModelEffortControl {
-                        models: self.models.clone(),
-                        model_id,
-                        effort,
-                        focus: menu_focus,
-                        on_open_change: Rc::new(move |open, window, cx| {
-                            menu_listener(open, window, cx);
-                        }),
-                    })
-                    .child(
-                        Button::new("composer-submit")
-                            .label(match action_kind {
-                                ComposerAction::Send => "Send",
-                                ComposerAction::Queue => "Queue",
-                            })
-                            .disabled(action.is_none())
-                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .id("composer-editor")
+                    .id("composer-card")
                     .test_support()
-                    .child(Textarea::new(&input).w_full()),
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(tokens.projected.border)
+                    .bg(tokens.projected.popover)
+                    .child(
+                        div()
+                            .id("composer-editor")
+                            .test_support()
+                            .child(Textarea::new(&input).w_full().bordered(false)),
+                    )
+                    .child(
+                        div()
+                            .id("composer-toolbar")
+                            .test_support()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_color(tokens.metis.foreground_secondary).child(
+                                Label::new(match self.permission {
+                                    SessionPermissionPolicy::AskEachTime => "Ask each time",
+                                }),
+                            ))
+                            .child(div().flex_1())
+                            .child(ModelEffortControl {
+                                models: self.models.clone(),
+                                model_id,
+                                effort,
+                                focus: menu_focus,
+                                on_open_change: Rc::new(move |open, window, cx| {
+                                    menu_listener(open, window, cx);
+                                }),
+                            })
+                            .child(
+                                Button::new("composer-submit")
+                                    .ghost()
+                                    .label(match action_kind {
+                                        ComposerAction::Send => "Send",
+                                        ComposerAction::Queue => "Queue",
+                                    })
+                                    .disabled(action.is_none())
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| this.submit(window, cx)),
+                                    ),
+                            ),
+                    ),
             )
             .children(stats_dock)
             .children(feedback.map(|feedback| {
@@ -856,7 +942,9 @@ impl RenderOnce for ModelEffortControl {
         let action_context = self.focus.clone();
         let on_open_change = self.on_open_change;
         Button::new("model-effort")
+            .ghost()
             .label(label)
+            .dropdown_caret(true)
             .disabled(current.is_none())
             .track_focus(&self.focus)
             .dropdown_menu(move |menu, window, cx| {
@@ -908,7 +996,7 @@ fn render_stats(
     if !stats.has_visible_domain() {
         return None;
     }
-    let mut dock = div().id("composer-stats").flex().gap_2();
+    let mut dock = div().id("composer-stats").flex().justify_center().gap_3();
     if let Some(activity) = &stats.activity {
         let summary = format!(
             "Activity · {} turns · {} steps",

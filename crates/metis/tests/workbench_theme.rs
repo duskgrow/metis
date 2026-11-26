@@ -5,7 +5,7 @@
 #[path = "../src/workbench/theme.rs"]
 mod theme;
 
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
 use gpui_kit::{
     App, AppContext as _, AssetSource, Context, Entity, EntityId, FocusHandle, TestAppContext,
@@ -14,10 +14,12 @@ use gpui_kit::{
     component::{Theme, ThemeMode},
     div,
     prelude::*,
-    px,
+    px, rgb,
     test::TestWindowExt as _,
 };
-use theme::{MetisThemeSpec, ResolvedTokens, ThemeController, theme_definition};
+use theme::{
+    MetisThemeSpec, MetisTokens, ProjectedTokens, ResolvedTokens, ThemeController, theme_definition,
+};
 
 fn standalone_config(definition: &MetisThemeSpec) -> Theme {
     let mut theme = Theme::default();
@@ -30,7 +32,18 @@ fn assert_config_reload(cx: &App, definition: &MetisThemeSpec) {
     let actual = Theme::global(cx);
     assert_eq!(actual.mode, definition.resolved.mode);
     assert_eq!(actual.colors.primary, expected.colors.primary);
+    assert_eq!(
+        actual.colors.primary_foreground,
+        expected.colors.primary_foreground
+    );
+    assert_eq!(actual.colors.primary_hover, expected.colors.primary_hover);
+    assert_eq!(
+        actual.colors.muted_foreground,
+        expected.colors.muted_foreground
+    );
+    assert_eq!(actual.colors.ring, expected.colors.ring);
     assert_eq!(actual.tokens.primary, expected.tokens.primary);
+    assert_eq!(actual.tokens.primary_hover, expected.tokens.primary_hover);
     assert_eq!(actual.font_size, expected.font_size);
     assert_eq!(actual.radius, expected.radius);
     assert_eq!(
@@ -52,6 +65,10 @@ fn assert_projection(cx: &App, definition: &MetisThemeSpec) {
     assert_eq!(theme.colors.foreground, expected.foreground);
     assert_eq!(theme.colors.popover, expected.popover);
     assert_eq!(theme.colors.primary, expected.primary);
+    assert_eq!(theme.colors.primary_foreground, expected.primary_foreground);
+    assert_eq!(theme.colors.primary_hover, expected.primary_hover);
+    assert_eq!(theme.colors.muted_foreground, expected.muted_foreground);
+    assert_eq!(theme.colors.ring, expected.ring);
     assert_eq!(theme.colors.selection, expected.selection);
     assert_eq!(theme.colors.border, expected.border);
     assert_eq!(theme.tokens.background.color, expected.background);
@@ -72,6 +89,15 @@ fn assert_projection(cx: &App, definition: &MetisThemeSpec) {
     assert_eq!(base.tokens.colors.background, expected.background);
     assert_eq!(base.tokens.colors.surface, expected.popover);
     assert_eq!(base.tokens.colors.primary, expected.primary);
+    assert_eq!(
+        base.tokens.colors.primary_foreground,
+        expected.primary_foreground
+    );
+    assert_eq!(
+        base.tokens.colors.muted_foreground,
+        expected.muted_foreground
+    );
+    assert_eq!(base.tokens.colors.ring, expected.ring);
     assert_eq!(base.tokens.colors.selection, expected.selection);
     assert_eq!(base.tokens.colors.border, expected.border);
     assert_eq!(base.tokens.radius.md, expected.radius);
@@ -188,6 +214,88 @@ fn assert_controller_is_the_complete_source(
         base.tokens.spacing.md,
         "density cannot be recovered from the default Base spacing projection"
     );
+}
+
+fn confirmed_prototype_tokens(mode: ThemeMode) -> ResolvedTokens {
+    let (projected, metis) = match mode {
+        ThemeMode::Light => (
+            ProjectedTokens {
+                background: rgb(0x00f7_f8f9).into(),
+                foreground: rgb(0x0020_252b).into(),
+                popover: rgb(0x00ff_ffff).into(),
+                primary: rgb(0x0039_6d9e).into(),
+                primary_foreground: rgb(0x00ff_ffff).into(),
+                primary_hover: rgb(0x002e_5d88).into(),
+                muted_foreground: rgb(0x0060_6a75).into(),
+                ring: rgb(0x0027_6da9).into(),
+                selection: rgb(0x00e1_e7ec).into(),
+                border: rgb(0x00c6_cdd4).into(),
+                radius: px(6.),
+                radius_lg: px(8.),
+                font_size: px(14.),
+                mono_font_size: px(12.),
+                shadow: true,
+            },
+            MetisTokens {
+                navigation_surface: rgb(0x00f0_f2f4).into(),
+                code_surface: rgb(0x00f3_f5f6).into(),
+                foreground_secondary: rgb(0x0048_515c).into(),
+                border_subtle: rgb(0x00dc_e1e5).into(),
+                status_info: rgb(0x0031_5f8b).into(),
+                diff_addition_surface: rgb(0x00e7_f2e9).into(),
+                syntax_keyword: rgb(0x006b_4896).into(),
+                metadata_font_size: px(12.),
+                density_gap: px(8.),
+                motion_duration: Duration::from_millis(120),
+            },
+        ),
+        ThemeMode::Dark => (
+            ProjectedTokens {
+                background: rgb(0x0017_191c).into(),
+                foreground: rgb(0x00e7_e9ec).into(),
+                popover: rgb(0x0020_2428).into(),
+                primary: rgb(0x008a_b7e4).into(),
+                primary_foreground: rgb(0x0010_1820).into(),
+                primary_hover: rgb(0x00a2_c8eb).into(),
+                muted_foreground: rgb(0x0098_9fa9).into(),
+                ring: rgb(0x00a9_ccf3).into(),
+                selection: rgb(0x002a_3036).into(),
+                border: rgb(0x003a_4047).into(),
+                radius: px(6.),
+                radius_lg: px(8.),
+                font_size: px(14.),
+                mono_font_size: px(12.),
+                shadow: true,
+            },
+            MetisTokens {
+                navigation_surface: rgb(0x001b_1e21).into(),
+                code_surface: rgb(0x001c_2024).into(),
+                foreground_secondary: rgb(0x00b9_bec6).into(),
+                border_subtle: rgb(0x002b_3035).into(),
+                status_info: rgb(0x00a5_c4e4).into(),
+                diff_addition_surface: rgb(0x001d_2b24).into(),
+                syntax_keyword: rgb(0x00b9_a8e2).into(),
+                metadata_font_size: px(12.),
+                density_gap: px(8.),
+                motion_duration: Duration::from_millis(120),
+            },
+        ),
+    };
+    ResolvedTokens {
+        mode,
+        projected,
+        metis,
+    }
+}
+
+#[test]
+fn workbench_theme_keeps_the_confirmed_prototype_baseline() {
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        assert_eq!(
+            theme_definition(mode).resolved,
+            confirmed_prototype_tokens(mode)
+        );
+    }
 }
 
 #[gpui_kit::test]

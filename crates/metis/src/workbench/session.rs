@@ -28,6 +28,14 @@ use composer::Composer;
 use navigation::SessionNavigation;
 use timeline::SessionTimeline;
 
+const SIDEBAR_WIDTH: f32 = 268.;
+const SESSION_HEADER_HEIGHT: f32 = 86.;
+const SESSION_CONTENT_WIDTH: f32 = 800.;
+const SESSION_HEADER_WIDTH: f32 = 820.;
+const COMPOSER_REGION_HEIGHT: f32 = 192.;
+const COMPOSER_APPROVAL_HEIGHT: f32 = 320.;
+const COMPOSER_QUEUE_HEIGHT: f32 = 384.;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum ConnectionState {
     Online,
@@ -52,19 +60,6 @@ pub(super) enum ExecutionState {
     Unknown,
 }
 
-impl ExecutionState {
-    fn label(self) -> &'static str {
-        match self {
-            Self::NotExecuted => "Not executed",
-            Self::Running => "Running",
-            Self::Succeeded => "Succeeded",
-            Self::Failed => "Failed",
-            Self::Stopped => "Stopped",
-            Self::Unknown => "Unknown",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum ApprovalState {
     #[default]
@@ -84,6 +79,8 @@ pub(super) struct ToolCallProjection {
     pub(super) key: ToolCallKey,
     pub(super) title: String,
     pub(super) arguments: String,
+    pub(super) cwd: Option<String>,
+    pub(super) reason: Option<String>,
     pub(super) execution: ExecutionState,
     pub(super) approval: ApprovalState,
     pub(super) output: Option<String>,
@@ -475,6 +472,40 @@ impl Workbench {
         cx.notify();
     }
 
+    fn reveal_tool_call(
+        &mut self,
+        call: &ToolCallKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let valid = self.current_projection().is_some_and(|session| {
+            session.key == call.session
+                && session
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, TimelineItem::Tool(tool) if &tool.key == call))
+        });
+        if !valid {
+            return;
+        }
+        let revealed = self.timeline.as_ref().is_some_and(|timeline| {
+            timeline.update(cx, |timeline, cx| {
+                timeline.reveal_tool(&call.call_id, window, cx)
+            })
+        });
+        if !revealed {
+            return;
+        }
+        let current = self.current_projection().cloned();
+        if let Some(controller) = &mut self.controller {
+            controller.note_focus(
+                FocusAnchor::new(MainView::Session(call.session.clone()), Region::Timeline)
+                    .with_item(call.call_id.clone()),
+                current.as_ref(),
+            );
+        }
+    }
+
     fn open_session(&mut self, session: SessionKey, window: &mut Window, cx: &mut Context<Self>) {
         let Some(projection) = self.projection.session(&session).cloned() else {
             return;
@@ -813,10 +844,31 @@ impl Render for Workbench {
         let title = current
             .as_ref()
             .map_or("No Session selected", |session| session.title.as_str());
+        let context = current.as_ref().map_or_else(
+            || "No Host or Worktree selected".to_owned(),
+            |session| {
+                let key = &session.key;
+                format!(
+                    "{} · {} · {}",
+                    key.worktree.project.host_id,
+                    key.worktree.project.project_id,
+                    key.worktree.worktree_id
+                )
+            },
+        );
         let connection = match self.projection.connection {
             ConnectionState::Online => "Online · injected projection",
             ConnectionState::Offline => "Offline · Host actions unavailable",
         };
+        let composer_height = current.as_ref().map_or(COMPOSER_REGION_HEIGHT, |session| {
+            if !session.queue.is_empty() {
+                COMPOSER_QUEUE_HEIGHT
+            } else if session.pending_approval().is_some() {
+                COMPOSER_APPROVAL_HEIGHT
+            } else {
+                COMPOSER_REGION_HEIGHT
+            }
+        });
         let navigation = self.navigation.clone();
         let timeline = self.timeline.clone();
         let composer = self.composer.clone();
@@ -829,14 +881,20 @@ impl Render for Workbench {
             .text_color(tokens.projected.foreground)
             .child(
                 div()
-                    .w(px(264.))
+                    .id("session-navigation")
+                    .test_support()
+                    .w(px(SIDEBAR_WIDTH))
                     .h_full()
                     .flex_none()
                     .bg(tokens.metis.navigation_surface)
-                    .child(navigation),
+                    .border_r_1()
+                    .border_color(tokens.metis.border_subtle)
+                    .child(div().size_full().child(navigation)),
             )
             .child(
                 div()
+                    .id("session-main")
+                    .test_support()
                     .relative()
                     .flex_1()
                     .min_w_0()
@@ -848,39 +906,67 @@ impl Render for Workbench {
                             .left_0()
                             .right_0()
                             .top_0()
-                            .h(px(60.))
+                            .id("session-header")
+                            .test_support()
+                            .h(px(SESSION_HEADER_HEIGHT))
                             .flex()
-                            .items_center()
-                            .gap_3()
-                            .p_3()
+                            .justify_center()
                             .border_b_1()
-                            .border_color(tokens.projected.border)
+                            .border_color(tokens.metis.border_subtle)
                             .track_focus(&self.header_focus)
-                            .child(div().flex_1().child(title.to_owned()))
                             .child(
                                 div()
-                                    .text_color(tokens.metis.foreground_secondary)
-                                    .text_size(tokens.metis.metadata_font_size)
-                                    .child(connection),
-                            )
-                            .child(
-                                Button::new("theme-toggle")
-                                    .label(if mode.is_dark() {
-                                        "Use Light"
-                                    } else {
-                                        "Use Dark"
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.set_theme(
-                                            if mode.is_dark() {
-                                                ThemeMode::Light
-                                            } else {
-                                                ThemeMode::Dark
-                                            },
-                                            window,
-                                            cx,
-                                        );
-                                    })),
+                                    .w_full()
+                                    .max_w(px(SESSION_HEADER_WIDTH))
+                                    .flex_col()
+                                    .justify_center()
+                                    .gap_1()
+                                    .py_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_3()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .text_size(px(16.))
+                                                    .child(title.to_owned()),
+                                            )
+                                            .child(
+                                                Button::new("theme-toggle")
+                                                    .label(if mode.is_dark() {
+                                                        "Use Light"
+                                                    } else {
+                                                        "Use Dark"
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.set_theme(
+                                                                if mode.is_dark() {
+                                                                    ThemeMode::Light
+                                                                } else {
+                                                                    ThemeMode::Dark
+                                                                },
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(tokens.projected.muted_foreground)
+                                            .text_size(tokens.metis.metadata_font_size)
+                                            .child(context),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(tokens.projected.muted_foreground)
+                                            .text_size(tokens.metis.metadata_font_size)
+                                            .child(connection),
+                                    ),
                             ),
                     )
                     .children(match current_view {
@@ -889,7 +975,7 @@ impl Render for Workbench {
                                 .absolute()
                                 .left_0()
                                 .right_0()
-                                .top(px(60.))
+                                .top(px(SESSION_HEADER_HEIGHT))
                                 .bottom_0()
                                 .children(timeline.map(|timeline| {
                                     div()
@@ -899,8 +985,18 @@ impl Render for Workbench {
                                         .left_0()
                                         .right_0()
                                         .top_0()
-                                        .bottom(px(240.))
-                                        .child(timeline)
+                                        .bottom(px(composer_height))
+                                        .flex()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .id("session-timeline-content")
+                                                .test_support()
+                                                .w_full()
+                                                .max_w(px(SESSION_CONTENT_WIDTH))
+                                                .h_full()
+                                                .child(timeline),
+                                        )
                                 }))
                                 .children(composer.map(|composer| {
                                     div()
@@ -910,9 +1006,18 @@ impl Render for Workbench {
                                         .left_0()
                                         .right_0()
                                         .bottom_0()
-                                        .h(px(240.))
+                                        .h(px(composer_height))
                                         .overflow_y_scroll()
-                                        .child(composer)
+                                        .flex()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .id("session-composer-content")
+                                                .test_support()
+                                                .w_full()
+                                                .max_w(px(SESSION_CONTENT_WIDTH))
+                                                .child(composer),
+                                        )
                                 })),
                         ),
                         Some(MainView::Diff { .. } | MainView::Subagent { .. }) => Some(
@@ -920,7 +1025,7 @@ impl Render for Workbench {
                                 .absolute()
                                 .left_0()
                                 .right_0()
-                                .top(px(60.))
+                                .top(px(SESSION_HEADER_HEIGHT))
                                 .bottom_0()
                                 .p_4()
                                 .child("This slice keeps Diff and Subagent as pure models only.")
@@ -930,7 +1035,7 @@ impl Render for Workbench {
                                     }),
                                 )),
                         ),
-                        None => Some(div().absolute().left_0().right_0().top(px(60.)).bottom_0().items_center().justify_center().p_8().child(
+                        None => Some(div().absolute().left_0().right_0().top(px(SESSION_HEADER_HEIGHT)).bottom_0().items_center().justify_center().p_8().child(
                             div().text_color(tokens.metis.foreground_secondary).child(
                                 "No Host is connected. No Session or execution is being simulated.",
                             ),

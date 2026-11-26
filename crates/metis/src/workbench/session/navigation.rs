@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gpui_kit::{
     App, Context, Entity, FocusHandle, Render, Subscription, WeakEntity, Window,
-    base::Disableable as _,
+    base::{Disableable as _, TestSupportExt as _},
     component::{
         button::{Button, ButtonVariants as _},
         list::ListItem,
@@ -11,9 +11,12 @@ use gpui_kit::{
     },
     div,
     prelude::*,
+    px,
 };
 
 use super::{SessionKey, Workbench, WorkbenchProjection, logical_id, session_id};
+
+const NAVIGATION_CONTENT_TOP: f32 = 46.;
 use crate::workbench::identity::{ProjectKey, WorktreeKey};
 
 #[derive(Clone)]
@@ -274,13 +277,38 @@ impl Render for SessionNavigation {
         let tree = self.tree.clone();
         let targets = self.targets.clone();
         let tokens = self.tokens(cx);
+        let row_tokens = tokens.clone();
         let empty = targets.is_empty();
         let owner = self.parent.upgrade().expect("navigation owner is alive");
         let filter_owner = owner.clone();
-        let tree_element = Tree::new(&tree, move |_, entry, _, window, _| {
+        let tree_element = Tree::new(&tree, move |_, entry, selected, window, _| {
             let id = entry.item().id.clone();
             let label = entry.item().label.clone();
-            let item = ListItem::new(id.clone()).child(label);
+            let marker = if entry.is_folder() {
+                if entry.is_expanded() { "▾" } else { "▸" }
+            } else {
+                ""
+            };
+            // UI tree depth stays small; subpixel indentation does not need
+            // lossless usize precision.
+            #[allow(clippy::cast_precision_loss)]
+            let indentation = px(entry.depth() as f32 * 12.);
+            let item = ListItem::new(id.clone())
+                .w_full()
+                .rounded_md()
+                .pl(indentation)
+                .when(selected, |item| {
+                    item.bg(row_tokens.projected.selection)
+                        .text_color(row_tokens.projected.foreground)
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(12.)).flex_none().child(marker))
+                        .child(label),
+                );
             let Some(session) = targets.get(id.as_str()).cloned() else {
                 return item;
             };
@@ -301,6 +329,7 @@ impl Render for SessionNavigation {
         let filter = Button::new("host-filter")
             .ghost()
             .label(host_filter.as_deref().unwrap_or("All Hosts"))
+            .dropdown_caret(true)
             .disabled(hosts.is_empty())
             .track_focus(&self.filter_focus)
             .dropdown_menu(move |menu, _, _| {
@@ -319,9 +348,11 @@ impl Render for SessionNavigation {
             })
             .on_open_change(move |open, window, cx| filter_listener(open, window, cx));
         div()
+            .relative()
             .flex_col()
             .size_full()
-            .p(tokens.metis.density_gap)
+            .px_2()
+            .py(tokens.metis.density_gap)
             .on_action(cx.listener(|this, action: &SelectHost, _, cx| {
                 this.select_host(action.0.clone(), cx);
             }))
@@ -332,7 +363,19 @@ impl Render for SessionNavigation {
                     .text_size(tokens.metis.metadata_font_size)
                     .child("Offline · no Host or Sessions")
             }))
-            .child(div().flex_1().min_h_0().child(tree_element))
+            .child(
+                // The virtualized Tree needs a definite viewport; a growing
+                // flex wrapper can resolve to zero height in the native renderer.
+                div()
+                    .id("session-navigation-tree")
+                    .test_support()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(NAVIGATION_CONTENT_TOP))
+                    .bottom_0()
+                    .child(tree_element.size_full()),
+            )
     }
 }
 

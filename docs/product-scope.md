@@ -47,22 +47,11 @@ Metis 让个人用户在一个工作台中操作多台主机上的智能体，�
 
 **当前状态与交付顺序**
 
-当前切片已完成纯行为模型、Light/Dark 主题写路径、Markdown 安全适配、Disclosure、Session headless 纵切，以及未绑定产品键位的 `FocusTopology`；已有行为测试与 headless probes 通过。原型固化收尾仍未完成，这些局部成果不代表完整原生流程已经接通。
+当前切片已完成纯行为模型、Light/Dark 主题写路径、Markdown 安全适配、Disclosure、Session headless 纵切，以及未绑定产品键位的 `FocusTopology`；已有行为测试、headless probes 和局部 Session 真实帧审查通过。原型固化收尾已完成，但这些局部成果不代表完整原生流程已经接通。
 
 [Workbench 产品入口](../crates/metis/src/main.rs)只创建诚实的 Offline 空状态，不连接 Host 或模拟 Session 执行；交互 preview 只由 [Session 测试](../crates/metis/src/workbench/session/tests.rs)注入投影和 effect，不是产品运行模式。
 
-原型固化收尾是唯一下一阶段。完成后，Workbench 依次清理 `target/` 中本阶段临时产物、接入真实 Host、完成 Diff/Subagent 与 Queue 流程、打通完整冷启动，最后进行 OS/性能验收。工程接手入口和验证边界由上文组件契约持有。
-
-**临时：原型固化收尾与 `target/` 退出条件**
-
-- [ ] 将视觉 token 和布局与已确认原型对齐；任何保留偏差必须经体验与工程双评审明确记录。
-- [x] 处理当前作者标签、审批 decision dock 位置等已知偏差，并复核受影响状态。
-- [x] 将已确认原型的完整多 Host/Worktree、Diff/Subagent、Queue 与重连夹具转化为 Rust 测试，覆盖 Queue 编辑、取消和不自动重放。
-- [ ] 使用临时截图对比已确认原型与原生关键状态，记录审查范围和未覆盖限制；截图不作为交付物保存。
-- [x] 将有界历史、流式和大文件的性能口径、预算与证据要求写入测试定义。
-- [x] 确认代码、测试和文档均不依赖 `target/`，并通过 `just ci`。
-
-`target/design/workbench-first-slice/` 下的 HTML 和截图只是待回收的临时参照，不是规范正本；旧 `HANDOFF.md` 与 `native-contract.md` 不作为接手入口。完成本清单后，清理这些临时产物并删除本小节；后续状态回到里程碑与组件契约维护，不把本小节留作历史记录。
+下一阶段是接入真实 Host，随后完成 Diff/Subagent 与 Queue 流程、打通完整冷启动，最后进行 OS/性能验收。工程接手入口、保留偏差和验证边界由上文组件契约持有。
 
 **设计准备**
 

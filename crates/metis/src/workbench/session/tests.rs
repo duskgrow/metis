@@ -45,6 +45,8 @@ fn session_projection(id: &str) -> SessionProjection {
         key: ToolCallKey::new(key.clone(), "call-1"),
         title: "read_file".to_owned(),
         arguments: "/workspace/a/long/path.rs".to_owned(),
+        cwd: Some("/workspace".to_owned()),
+        reason: Some("Verify the current Host snapshot before accepting changes.".to_owned()),
         execution: ExecutionState::NotExecuted,
         approval: ApprovalState::NotRequested,
         output: None,
@@ -684,6 +686,12 @@ fn queue_cancel_removes_only_target_item_and_preserves_other_sessions(cx: &mut T
     let mut cx = visual(handle, cx);
     settle(&mut cx);
     let retained = queue_input(&view, &cx, "q1").entity_id();
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find("session-composer-region").bounds().size.height,
+            px(384.)
+        );
+    });
     scroll_composer(&mut cx, -1000.);
     cx.update(|window, cx| window.click("queue-cancel:q2", cx));
     settle(&mut cx);
@@ -731,6 +739,10 @@ fn queue_cancel_removes_only_target_item_and_preserves_other_sessions(cx: &mut T
     );
     cx.update(|window, cx| {
         assert!(window.try_find("session-queue").is_none());
+        assert_eq!(
+            window.find("session-composer-region").bounds().size.height,
+            px(320.)
+        );
         assert!(
             input(&view, cx)
                 .read(cx)
@@ -984,9 +996,43 @@ fn reconnect_does_not_replay_queue_or_revive_stale_approval(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn prototype_shell_uses_centered_reading_and_composer_tracks(cx: &mut TestAppContext) {
+    let (handle, _view, _) = open_preview(cx, preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    cx.update(|window, _| {
+        let navigation = window.find("session-navigation").bounds();
+        let navigation_tree = window.find("session-navigation-tree").bounds();
+        let main = window.find("session-main").bounds();
+        let header = window.find("session-header").bounds();
+        let timeline = window.find("session-timeline-content").bounds();
+        let composer = window.find("session-composer-content").bounds();
+        let composer_region = window.find("session-composer-region").bounds();
+        assert_eq!(navigation.size.width, px(268.));
+        assert!(
+            navigation_tree.size.height > px(400.),
+            "the native Tree needs a nonzero scrolling viewport: {navigation_tree:?}"
+        );
+        assert_eq!(window.find(2usize).selected(), Some(true));
+        assert_eq!(header.size.height, px(86.));
+        assert_eq!(timeline.size.width, px(800.));
+        assert_eq!(composer.size.width, px(800.));
+        assert_eq!(composer_region.size.height, px(192.));
+        for content in [timeline, composer] {
+            let left = content.origin.x - main.origin.x;
+            let right = main.origin.x + main.size.width - content.origin.x - content.size.width;
+            assert_eq!(
+                left, right,
+                "content must be centered: {content:?} vs {main:?}"
+            );
+        }
+    });
+}
+
+#[gpui_kit::test]
 fn user_messages_have_no_author_label_and_use_locatable_bubbles(cx: &mut TestAppContext) {
     let long_message =
-        "请检查这个文件并保留现有行为，确保长中文内容能够在用户气泡中自然换行。".repeat(4);
+        "请检查这个文件并保留现有行为，确保长中文内容能够在用户气泡中自然换行。".repeat(6);
     let mut projection = preview();
     let TimelineItem::User { text, .. } = &mut Rc::make_mut(&mut projection.sessions[0].items)[0]
     else {
@@ -1045,11 +1091,24 @@ fn approval_dock_precedes_the_editor_and_stays_outside_the_tool_card(cx: &mut Te
             );
         }
         let dock = window.find("approval-dock-call-1").bounds();
+        let composer_region = window.find("session-composer-region").bounds();
         let editor = window.find("composer-editor").bounds();
+        let toolbar = window.find("composer-toolbar").bounds();
+        assert_eq!(composer_region.size.height, px(320.));
         assert!(
             dock.origin.y + dock.size.height <= editor.origin.y + px(1.),
             "decision dock must be above the editor: {dock:?} vs {editor:?}"
         );
+        assert!(
+            editor.origin.y + editor.size.height <= toolbar.origin.y + px(1.),
+            "the editor must precede its toolbar inside the Composer card: {editor:?} vs {toolbar:?}"
+        );
+        for element in ["composer-editor", "composer-toolbar"] {
+            assert!(
+                window.within("composer-card").try_find(element).is_some(),
+                "{element} must stay inside the Composer card"
+            );
+        }
         assert!(
             window
                 .within("session-composer-region")
@@ -1059,17 +1118,103 @@ fn approval_dock_precedes_the_editor_and_stays_outside_the_tool_card(cx: &mut Te
         for button in ["approval-allow-call-1", "approval-reject-call-1"] {
             assert!(window.within("tool-call-call-1").try_find(button).is_none());
         }
+        for element in [
+            "approval-source-call-1",
+            "approval-cwd-call-1",
+            "approval-reason-call-1",
+        ] {
+            let element = window.find(element);
+            assert!(element.visible(), "approval detail is not visible: {element:?}");
+        }
         let painted = test_support::texts(window);
         for expected in [
             "Approval for this tool call",
             "read_file",
             "/workspace/a/long/path.rs",
+            "cwd /workspace",
+            "Verify the current Host snapshot before accepting changes.",
         ] {
             assert!(
                 painted.iter().any(|text| text.text().contains(expected)),
                 "missing approval content {expected:?}: {painted:?}"
             );
         }
+        for unexpected in ["Not executed", "Approval pending"] {
+            assert!(
+                !painted.iter().any(|text| text.text().contains(unexpected)),
+                "pending approval must reuse the ordinary tool summary: {painted:?}"
+            );
+        }
+    });
+    cx.update(|window, cx| window.click("approval-source-call-1", cx));
+    settle(&mut cx);
+    cx.update(|window, _| {
+        let summary = window.find("tool-call-1-summary");
+        assert!(summary.visible());
+        assert_eq!(summary.expanded(), Some(true));
+        assert_eq!(summary.focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn approval_source_reveals_offscreen_tool_and_restores_its_logical_focus(cx: &mut TestAppContext) {
+    let mut projection = pending_preview();
+    let history = (0..30)
+        .map(|index| TimelineItem::User {
+            id: format!("history-{index}"),
+            text: format!("历史消息 {index}"),
+        })
+        .collect::<Vec<_>>();
+    Rc::make_mut(&mut projection.sessions[0].items).splice(0..0, history);
+    let (handle, view, _) = open_preview(cx, projection);
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    let timeline_scroller = scroller(&view, &cx);
+    timeline_scroller.update(&mut cx, |state, cx| state.scroll_to_item(0, cx));
+    settle(&mut cx);
+    let before = timeline_scroller.read_with(&cx, |state, _| state.logical_scroll_top());
+    cx.update(|window, cx| {
+        assert!(
+            window.try_find("tool-call-1-summary").is_none(),
+            "the regression fixture must start with the ToolCall offscreen"
+        );
+        window.click("approval-source-call-1", cx);
+    });
+    settle(&mut cx);
+    let after = scroller(&view, &cx).read_with(&cx, |state, _| state.logical_scroll_top());
+    assert_ne!(after.item_ix, before.item_ix);
+    let expected =
+        FocusAnchor::new(MainView::Session(session("one")), Region::Timeline).with_item("call-1");
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .controller
+            .as_ref()
+            .unwrap()
+            .navigation
+            .focus()
+            .clone()),
+        expected
+    );
+    cx.update(|window, cx| {
+        let summary = window.find("tool-call-1-summary");
+        assert!(summary.visible());
+        assert_eq!(summary.expanded(), Some(true));
+        assert_eq!(summary.focused(), Some(true));
+        window.click("theme-toggle", cx);
+    });
+    settle(&mut cx);
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .controller
+            .as_ref()
+            .unwrap()
+            .navigation
+            .focus()
+            .clone()),
+        expected
+    );
+    cx.update(|window, _| {
+        assert_eq!(window.find("tool-call-1-summary").focused(), Some(true));
     });
 }
 
@@ -1118,6 +1263,12 @@ fn session_approval_intent_updates_the_same_tool_card_without_an_execution_card(
     cx.update(|window, _| {
         assert_eq!(window.find("approval-allow-call-1").disabled(), Some(true));
         assert_eq!(window.find("approval-reject-call-1").disabled(), Some(true));
+        assert!(
+            test_support::texts(window)
+                .iter()
+                .any(|text| text.text().contains("Submitting")),
+            "Submitting must remain visible while both decisions are disabled"
+        );
     });
 
     let mut offline = pending_preview();
@@ -1149,6 +1300,12 @@ fn session_approval_intent_updates_the_same_tool_card_without_an_execution_card(
             text.text()
                 .contains("Host output arrives on the original call.")
         }));
+        for unexpected in ["Allowed once", "Arguments"] {
+            assert!(
+                !painted.iter().any(|text| text.text().contains(unexpected)),
+                "a decided tool must show only its ordinary output: {painted:?}"
+            );
+        }
     });
 }
 

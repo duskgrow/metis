@@ -463,6 +463,10 @@ fn workbench_popups_collapsible_carries_tool_body_with_a_thin_focusable_summary(
 
     cx.update(|window, cx| {
         assert!(window.try_find("collapsible-tool-output").is_none());
+        assert_eq!(
+            window.find("collapsible-tool-summary").expanded(),
+            Some(false)
+        );
         window.focus_next(cx);
         window.render_frame(cx);
         assert_eq!(
@@ -472,9 +476,17 @@ fn workbench_popups_collapsible_carries_tool_body_with_a_thin_focusable_summary(
         window.press("enter", cx);
         window.render_frame(cx);
         assert!(window.find("collapsible-tool-output").visible());
-        window.press("enter", cx);
+        assert_eq!(
+            window.find("collapsible-tool-summary").expanded(),
+            Some(true)
+        );
+        window.press("space", cx);
         window.render_frame(cx);
         assert!(window.try_find("collapsible-tool-output").is_none());
+        assert_eq!(
+            window.find("collapsible-tool-summary").expanded(),
+            Some(false)
+        );
         assert_eq!(
             window.find("collapsible-tool-summary").focused(),
             Some(true)
