@@ -6,14 +6,23 @@
 //! the `DshClient` exclusively, so the pump loop cannot execute RPCs even by
 //! accident: streams and the independent close signal always keep progress.
 
-use std::{sync::mpsc as std_mpsc, thread};
+use std::{
+    fs::{self, File, OpenOptions, TryLockError},
+    io,
+    path::{Path, PathBuf},
+    thread,
+};
 
 use serde_json::Value;
+use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
-use crate::client::{
-    ApprovalOutcome, ApprovalRequest, ClientError, ClientResult, DshClient, DshClientConfig,
-    DshStream, HostEvent, HostEvents,
+use crate::{
+    client::{
+        ApprovalOutcome, ApprovalRequest, ClientError, ClientResult, DshClient, DshClientConfig,
+        DshStream, HostEvent, HostEvents, Project,
+    },
+    runtime::{DshRuntime, DshRuntimeConfig, DshSupervisor},
 };
 
 /// Ordered events are never dropped; a full queue slows the Host stream.
@@ -22,6 +31,323 @@ const EVENT_CAPACITY: usize = 16;
 const COMMAND_CAPACITY: usize = 16;
 /// Snapshot budget for the visible Session window.
 const FOLLOW_MESSAGE_LIMIT: u64 = 200;
+
+/// Everything needed to prepare the local Workbench's private Host and first
+/// project-attached Session. Construction is blocking; graphical callers run it
+/// on a background executor.
+#[derive(Clone, Debug)]
+pub struct LocalSessionConfig {
+    pub runtime: DshRuntimeConfig,
+    pub client: DshClientConfig,
+    pub project_path: PathBuf,
+}
+
+/// A running local Host with its first Session ready for a dedicated transport.
+/// The authentication URL remains private and is never included in diagnostics.
+pub struct LocalSession {
+    runtime: DshRuntime,
+    auth_url: String,
+    client: DshClientConfig,
+    project: Project,
+    session_id: String,
+    // Declared after the runtime so an unobserved drop stops the Host before
+    // removing its state. ActiveHost also shuts down explicitly first.
+    owned_home: Option<OwnedHome>,
+}
+
+struct OwnedHome {
+    path: PathBuf,
+    lock_path: PathBuf,
+    lock: Option<File>,
+}
+
+impl OwnedHome {
+    fn create(parent: &Path) -> crate::Result<Self> {
+        fs::create_dir_all(parent).map_err(|source| crate::Error::RuntimePrepare {
+            path: parent.to_owned(),
+            source,
+        })?;
+        // Allocation and stale recovery are serialized. An owner lock is
+        // acquired before its run directory is published, so a free lock can
+        // never belong to a half-initialized live allocation.
+        let allocation_path = parent.join(".allocation.lock");
+        let allocation = open_lock(&allocation_path, false)?;
+        allocation
+            .lock()
+            .map_err(|source| crate::Error::RuntimePrepare {
+                path: allocation_path,
+                source,
+            })?;
+        recover_stale_homes(parent)?;
+
+        for attempt in 0..100 {
+            let stem = format!("run-{}-{attempt}", std::process::id());
+            let path = parent.join(&stem);
+            let lock_path = parent.join(format!(".{stem}.lock"));
+            let lock = match open_lock(&lock_path, true) {
+                Ok(lock) => lock,
+                Err(crate::Error::RuntimePrepare { source, .. })
+                    if source.kind() == io::ErrorKind::AlreadyExists =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if let Err(source) = lock.try_lock() {
+                drop(lock);
+                let _ = fs::remove_file(&lock_path);
+                let source = match source {
+                    TryLockError::WouldBlock => io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "new Workbench owner lock is unexpectedly held",
+                    ),
+                    TryLockError::Error(source) => source,
+                };
+                return Err(crate::Error::RuntimePrepare {
+                    path: lock_path,
+                    source,
+                });
+            }
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        lock_path,
+                        lock: Some(lock),
+                    });
+                }
+                Err(source) => {
+                    drop(lock);
+                    let _ = fs::remove_file(&lock_path);
+                    if source.kind() == io::ErrorKind::AlreadyExists {
+                        continue;
+                    }
+                    return Err(crate::Error::RuntimePrepare { path, source });
+                }
+            }
+        }
+        Err(crate::Error::RuntimePrepare {
+            path: parent.to_owned(),
+            source: io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "could not allocate an ephemeral Workbench Host directory",
+            ),
+        })
+    }
+}
+
+impl Drop for OwnedHome {
+    fn drop(&mut self) {
+        match fs::remove_dir_all(&self.path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&self.lock_path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let _ = fs::remove_file(&self.lock_path);
+            }
+            // Keep the lock path for a later recovery attempt if directory
+            // removal failed. Releasing the owner lock makes it eligible.
+            Err(_) => {}
+        }
+        self.lock.take();
+    }
+}
+
+fn open_lock(path: &Path, create_new: bool) -> crate::Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(!create_new)
+        .create_new(create_new);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|source| crate::Error::RuntimePrepare {
+            path: path.to_owned(),
+            source,
+        })
+}
+
+fn recover_stale_homes(parent: &Path) -> crate::Result<()> {
+    let entries = fs::read_dir(parent).map_err(|source| crate::Error::RuntimePrepare {
+        path: parent.to_owned(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| crate::Error::RuntimePrepare {
+            path: parent.to_owned(),
+            source,
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(stem) = name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".lock"))
+            .filter(|stem| stem.starts_with("run-"))
+        else {
+            continue;
+        };
+        let lock_path = entry.path();
+        let lock = match open_lock(&lock_path, false) {
+            Ok(lock) => lock,
+            Err(crate::Error::RuntimePrepare { source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match lock.try_lock() {
+            Ok(()) => {
+                drop(lock);
+                let path = parent.join(stem);
+                match fs::remove_dir_all(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(crate::Error::RuntimePrepare { path, source });
+                    }
+                }
+                match fs::remove_file(&lock_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(crate::Error::RuntimePrepare {
+                            path: lock_path,
+                            source,
+                        });
+                    }
+                }
+            }
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(source)) => {
+                return Err(crate::Error::RuntimePrepare {
+                    path: lock_path,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Error)]
+pub enum LocalSessionError {
+    #[error("failed to start the local Host: {0}")]
+    Runtime(#[source] Box<crate::Error>),
+    #[error("failed to create the local Host executor: {0}")]
+    Executor(#[source] io::Error),
+    #[error("the local project path is not valid UTF-8")]
+    ProjectPathNotUtf8,
+    #[error("local Host {operation} failed: {source}")]
+    Client {
+        operation: &'static str,
+        #[source]
+        source: Box<ClientError>,
+    },
+}
+
+impl LocalSession {
+    /// Start with an isolated child of `runtime.home` and remove that child
+    /// after the Host stops. The stable parent and caller-owned configuration
+    /// are never deleted.
+    pub fn start_ephemeral(
+        supervisor: &DshSupervisor,
+        config: &LocalSessionConfig,
+    ) -> Result<Self, LocalSessionError> {
+        let home = OwnedHome::create(&config.runtime.home)
+            .map_err(|error| LocalSessionError::Runtime(Box::new(error)))?;
+        let mut config = config.clone();
+        config.runtime.home.clone_from(&home.path);
+        let mut session = Self::start(supervisor, &config)?;
+        session.owned_home = Some(home);
+        Ok(session)
+    }
+
+    /// Start the supervised Host, open the configured project, create or reuse
+    /// its Session, and close the short-lived setup client. Any error drops the
+    /// runtime owner, which cleans up the supervised process tree.
+    pub fn start(
+        supervisor: &DshSupervisor,
+        config: &LocalSessionConfig,
+    ) -> Result<Self, LocalSessionError> {
+        let runtime = supervisor
+            .start(&config.runtime)
+            .map_err(|error| LocalSessionError::Runtime(Box::new(error)))?;
+        let auth_url = runtime.auth_url().to_owned();
+        let project_path = config
+            .project_path
+            .to_str()
+            .ok_or(LocalSessionError::ProjectPathNotUtf8)?
+            .to_owned();
+        let async_runtime = tokio::runtime::Runtime::new().map_err(LocalSessionError::Executor)?;
+        let (project, session_id) = async_runtime.block_on(async {
+            let client = DshClient::connect(&auth_url, config.client)
+                .await
+                .map_err(|source| LocalSessionError::Client {
+                    operation: "connection",
+                    source: Box::new(source),
+                })?;
+            let project = client.open_project(&project_path).await.map_err(|source| {
+                LocalSessionError::Client {
+                    operation: "project/open",
+                    source: Box::new(source),
+                }
+            })?;
+            let session_id =
+                client
+                    .create_session(&project.project_id)
+                    .await
+                    .map_err(|source| LocalSessionError::Client {
+                        operation: "session/create",
+                        source: Box::new(source),
+                    })?;
+            // The dedicated transport owns the long-lived connection. Setup
+            // close failure does not invalidate the already-created Session.
+            let _ = client.close().await;
+            Ok::<_, LocalSessionError>((project, session_id))
+        })?;
+        Ok(Self {
+            runtime,
+            auth_url,
+            client: config.client,
+            project,
+            session_id,
+            owned_home: None,
+        })
+    }
+
+    #[must_use]
+    pub fn project(&self) -> &Project {
+        &self.project
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn runtime(&self) -> &DshRuntime {
+        &self.runtime
+    }
+
+    /// Start a new client generation bound to the prepared Session.
+    #[must_use]
+    pub fn spawn_transport(&self) -> SessionTransport {
+        SessionTransport::spawn(&self.auth_url, &self.session_id, self.client)
+    }
+
+    /// Stop the supervised Host after its transport has been closed.
+    pub fn shutdown(&mut self) -> crate::Result<()> {
+        self.runtime.shutdown()
+    }
+}
 
 /// Intents accepted by the transport. Session identity is bound at spawn time;
 /// model/effort selection is not yet submitted to the Host. The caller owns
@@ -67,7 +393,7 @@ pub enum TransportEvent {
 pub struct SessionTransport {
     commands: mpsc::Sender<TransportCommand>,
     events: Option<mpsc::Receiver<TransportEvent>>,
-    wake: std_mpsc::Receiver<()>,
+    wake: Option<mpsc::Receiver<()>>,
     close: watch::Sender<bool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -79,7 +405,7 @@ impl SessionTransport {
     pub fn spawn(auth_url: &str, session_id: &str, config: DshClientConfig) -> Self {
         let (command_sender, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (event_sender, event_receiver) = mpsc::channel(EVENT_CAPACITY);
-        let (wake_sender, wake_receiver) = std_mpsc::sync_channel(1);
+        let (wake_sender, wake_receiver) = mpsc::channel(1);
         let (close_sender, close_receiver) = watch::channel(false);
         let auth_url = auth_url.to_owned();
         let session_id = session_id.to_owned();
@@ -112,7 +438,7 @@ impl SessionTransport {
         Self {
             commands: command_sender,
             events: Some(event_receiver),
-            wake: wake_receiver,
+            wake: Some(wake_receiver),
             close: close_sender,
             thread: Some(thread),
         }
@@ -132,8 +458,14 @@ impl SessionTransport {
     /// Coalesced wake signal: after receiving, drain all pending events.
     /// A full signal slot is fine because one wake covers every queued event.
     #[must_use]
-    pub fn wake(&self) -> &std_mpsc::Receiver<()> {
-        &self.wake
+    pub fn wake(&mut self) -> &mut mpsc::Receiver<()> {
+        self.wake.as_mut().expect("transport wake is available")
+    }
+
+    /// Move the coalesced wake signal to a UI event pump exactly once. The
+    /// receiver is `Send`, so waiting can stay off the UI thread.
+    pub fn take_wake(&mut self) -> Option<mpsc::Receiver<()>> {
+        self.wake.take()
     }
 
     /// Take the thread handle for diagnostics or a custom join; the close
@@ -165,7 +497,7 @@ impl Drop for SessionTransport {
 #[derive(Clone)]
 struct Outbox {
     events: mpsc::Sender<TransportEvent>,
-    wake: std_mpsc::SyncSender<()>,
+    wake: mpsc::Sender<()>,
 }
 
 impl Outbox {
@@ -519,19 +851,46 @@ mod tests {
 
     fn outbox_channels(
         capacity: usize,
-    ) -> (
-        Outbox,
-        mpsc::Receiver<TransportEvent>,
-        std_mpsc::Receiver<()>,
-    ) {
+    ) -> (Outbox, mpsc::Receiver<TransportEvent>, mpsc::Receiver<()>) {
         let (events, receiver) = mpsc::channel(capacity);
-        let (wake, wake_receiver) = std_mpsc::sync_channel(1);
+        let (wake, wake_receiver) = mpsc::channel(1);
         (Outbox { events, wake }, receiver, wake_receiver)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_homes_preserve_active_runs_and_recover_released_stale_locks() {
+        let parent =
+            std::env::temp_dir().join(format!("metis-owned-home-recovery-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&parent);
+        let active = OwnedHome::create(&parent).expect("create active home");
+        let active_path = active.path.clone();
+        let second = OwnedHome::create(&parent).expect("create second active home");
+        assert!(active_path.exists());
+
+        let mut stale = OwnedHome::create(&parent).expect("create stale fixture");
+        let stale_path = stale.path.clone();
+        let stale_lock = stale.lock_path.clone();
+        fs::write(stale_path.join("stale-marker"), "abandoned").expect("write stale marker");
+        // Process death releases the OS lock but cannot run Drop. Reproduce
+        // that exact ownership state without spawning an unbounded child.
+        stale.lock.take();
+        std::mem::forget(stale);
+        let recovered = OwnedHome::create(&parent).expect("recover stale home");
+        assert!(!stale_path.join("stale-marker").exists());
+        assert!(active_path.exists());
+
+        drop(recovered);
+        assert!(!stale_path.exists());
+        assert!(!stale_lock.exists());
+        drop(active);
+        drop(second);
+        fs::remove_dir_all(&parent).expect("remove recovery test parent");
     }
 
     #[tokio::test]
     async fn publish_wakes_once_per_burst_and_applies_backpressure() {
-        let (outbox, mut receiver, wake) = outbox_channels(2);
+        let (outbox, mut receiver, mut wake) = outbox_channels(2);
         let (_close_sender, mut close) = watch::channel(false);
         for _ in 0..2 {
             outbox

@@ -3,16 +3,19 @@
 
 mod support;
 
-use std::time::{Duration, Instant};
+use std::{
+    fs,
+    time::{Duration, Instant},
+};
 
 use metis::{
-    client::{
-        ApprovalOutcome, ApprovalRequest, ClientError, DshClient, DshClientConfig, HostEvent,
+    client::{ApprovalOutcome, ApprovalRequest, ClientError, DshClientConfig, HostEvent},
+    runtime::DshSupervisor,
+    session_transport::{
+        LocalSession, LocalSessionConfig, SessionTransport, TransportCommand, TransportEvent,
     },
-    runtime::{DshRuntime, DshSupervisor},
-    session_transport::{SessionTransport, TransportCommand, TransportEvent},
 };
-use support::{TestDirectory, approval_runtime_config, create_session_at};
+use support::{TestDirectory, approval_runtime_config, real_dsh_entrypoint, runtime_config};
 use tokio::sync::mpsc;
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -20,45 +23,52 @@ const WAIT: Duration = Duration::from_secs(30);
 struct TransportFixture {
     // Held for cleanup; the Session id is only needed during setup.
     _directory: TestDirectory,
-    runtime: DshRuntime,
+    local: LocalSession,
     transport: SessionTransport,
     events: mpsc::Receiver<TransportEvent>,
 }
 
 fn approval_transport(name: &str) -> TransportFixture {
     let directory = TestDirectory::new(name);
-    let config = approval_runtime_config(&directory);
-    let runtime = DshSupervisor::system()
-        .start(&config)
-        .expect("start Host with approval fixture");
-
-    // Session creation belongs to the product entry, so the transport binds an
-    // already-created Session through a separate, short-lived setup client.
-    let auth_url = runtime.auth_url().to_owned();
-    let setup_runtime = tokio::runtime::Runtime::new().expect("create setup runtime");
-    let session_id = setup_runtime.block_on(async {
-        let client = DshClient::connect(&auth_url, DshClientConfig::default())
-            .await
-            .expect("connect setup client");
-        let session_id = create_session_at(&client, &directory.path).await;
-        client.close().await.expect("close setup client");
-        session_id
-    });
-    drop(setup_runtime);
-
-    let mut transport = SessionTransport::spawn(&auth_url, &session_id, DshClientConfig::default());
+    // Product cold start owns project opening and Session creation; transport
+    // tests start from that same prepared state rather than duplicating setup.
+    let local = LocalSession::start(
+        &DshSupervisor::system(),
+        &LocalSessionConfig {
+            runtime: approval_runtime_config(&directory),
+            client: DshClientConfig::default(),
+            project_path: directory.path.clone(),
+        },
+    )
+    .expect("prepare local project Session");
+    assert_ne!(local.session_id(), "");
+    let mut transport = local.spawn_transport();
     let events = transport.take_events().expect("take transport events");
     TransportFixture {
         _directory: directory,
-        runtime,
+        local,
         transport,
         events,
     }
 }
 
+fn run_artifacts(home: &std::path::Path) -> Vec<fs::DirEntry> {
+    fs::read_dir(home)
+        .expect("read ephemeral parent")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect ephemeral entries")
+        .into_iter()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("run-") || name.starts_with(".run-")
+        })
+        .collect()
+}
+
 fn next_event(
     events: &mut mpsc::Receiver<TransportEvent>,
-    wake: &std::sync::mpsc::Receiver<()>,
+    wake: &mut mpsc::Receiver<()>,
     what: &str,
 ) -> TransportEvent {
     let deadline = Instant::now() + WAIT;
@@ -66,7 +76,9 @@ fn next_event(
         if let Ok(event) = events.try_recv() {
             return event;
         }
-        let _ = wake.recv_timeout(Duration::from_millis(50));
+        if wake.try_recv().is_err() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
     }
 }
@@ -74,11 +86,22 @@ fn next_event(
 fn expect_connected(fixture: &mut TransportFixture) {
     // The wake must arrive with the first event; polling events alone would
     // not catch a missing wake signal.
-    fixture
-        .transport
-        .wake()
-        .recv_timeout(WAIT)
-        .expect("wake after connect");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match fixture.transport.wake().try_recv() {
+            Ok(()) => break,
+            Err(mpsc::error::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                panic!("wake channel closed before Connected")
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for connect wake"
+        );
+    }
     match next_event(&mut fixture.events, fixture.transport.wake(), "Connected") {
         TransportEvent::Connected { client_id } => assert_ne!(client_id, ""),
         other => panic!("expected Connected, got {other:?}"),
@@ -87,7 +110,7 @@ fn expect_connected(fixture: &mut TransportFixture) {
 
 fn next_follow_frame(
     events: &mut mpsc::Receiver<TransportEvent>,
-    wake: &std::sync::mpsc::Receiver<()>,
+    wake: &mut mpsc::Receiver<()>,
     predicate: impl Fn(&serde_json::Value) -> bool,
     what: &str,
 ) {
@@ -115,6 +138,47 @@ fn wait_until(mut predicate: impl FnMut() -> bool, what: &str) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[test]
+fn ephemeral_homes_are_removed_after_success_and_startup_failure() {
+    let directory = TestDirectory::new("ephemeral-home-cleanup");
+    let home = directory.path.join("workbench-runs");
+    let mut runtime = runtime_config(&directory, real_dsh_entrypoint());
+    runtime.home.clone_from(&home);
+    let config = LocalSessionConfig {
+        runtime,
+        client: DshClientConfig::default(),
+        project_path: directory.path.clone(),
+    };
+    let mut local = LocalSession::start_ephemeral(&DshSupervisor::system(), &config)
+        .expect("start ephemeral Host");
+    let runs = run_artifacts(&home);
+    assert_eq!(runs.len(), 2, "run directory and its owner lock");
+    let run_home = runs
+        .iter()
+        .find(|entry| entry.file_type().expect("run file type").is_dir())
+        .expect("run directory")
+        .path();
+    local.shutdown().expect("stop ephemeral Host");
+    drop(local);
+    assert!(!run_home.exists());
+
+    let mut missing_runtime = runtime_config(&directory, real_dsh_entrypoint());
+    missing_runtime.home.clone_from(&home);
+    missing_runtime.metis_executable = directory.path.join("missing-metis");
+    assert!(
+        LocalSession::start_ephemeral(
+            &DshSupervisor::system(),
+            &LocalSessionConfig {
+                runtime: missing_runtime,
+                project_path: directory.path.clone(),
+                ..config
+            },
+        )
+        .is_err()
+    );
+    assert!(run_artifacts(&home).is_empty());
 }
 
 #[test]
@@ -215,7 +279,8 @@ fn prompt_approval_and_failure_round_trip_through_real_host() {
             }
         }
         if fixture
-            .runtime
+            .local
+            .runtime()
             .output_snapshot()
             .contains("[metis-test] approval resolved")
         {
@@ -223,7 +288,8 @@ fn prompt_approval_and_failure_round_trip_through_real_host() {
         }
         if Instant::now() >= deadline {
             for line in fixture
-                .runtime
+                .local
+                .runtime()
                 .output_snapshot()
                 .lines()
                 .filter(|line| line.contains("[metis-test]"))
@@ -237,7 +303,7 @@ fn prompt_approval_and_failure_round_trip_through_real_host() {
     }
 
     fixture
-        .runtime
+        .local
         .shutdown()
         .expect("stop approval fixture Host");
     loop {
