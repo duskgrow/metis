@@ -81,7 +81,7 @@ impl SessionTimeline {
         let previous_markdown = previous_items
             .iter()
             .filter_map(|item| match item {
-                TimelineItem::Model { id, markdown } => Some((id.as_str(), markdown.as_str())),
+                TimelineItem::Model { id, markdown } => Some((id.as_str(), markdown)),
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
@@ -97,7 +97,11 @@ impl SessionTimeline {
                 TimelineItem::Model { id, markdown } => {
                     let key = format!("model:{id}");
                     if let Some(text) = state.markdown.get(&key) {
-                        if previous_markdown.get(id.as_str()).copied() != Some(markdown.as_str()) {
+                        let changed = previous_markdown.get(id.as_str()).is_none_or(|previous| {
+                            !Rc::ptr_eq(previous, markdown)
+                                && previous.as_ref() != markdown.as_ref()
+                        });
+                        if changed {
                             #[cfg(test)]
                             {
                                 self.markdown_set_text_calls += 1;
@@ -169,7 +173,6 @@ impl SessionTimeline {
             .clone()
     }
 
-    #[cfg(test)]
     pub(super) fn prune(&mut self, live: &BTreeSet<SessionKey>) {
         self.states.retain(|key, _| live.contains(key));
         self.pending_link
@@ -396,7 +399,7 @@ fn render_item(
                     .text_color(tokens.projected.foreground)
                     .px_3()
                     .py_2()
-                    .child(Label::new(text)),
+                    .child(Label::new(text.as_ref())),
             )
             .into_any_element(),
         TimelineItem::Model { id, .. } => {
@@ -496,7 +499,11 @@ impl RenderOnce for ToolCallView {
                 |body| {
                     body.child(format!("Arguments\n{}", call.arguments))
                         .children(call.cwd.clone().map(|cwd| Label::new(format!("cwd {cwd}"))))
-                        .children(call.reason.clone().map(Label::new))
+                        .children(
+                            call.reason
+                                .clone()
+                                .map(|reason| Label::new(reason.as_ref())),
+                        )
                 },
             )
             .child(output);

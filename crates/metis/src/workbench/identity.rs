@@ -7,7 +7,6 @@ pub(super) struct ProjectKey {
 }
 
 impl ProjectKey {
-    #[cfg(test)]
     pub(super) fn new(host_id: impl Into<String>, project_id: impl Into<String>) -> Self {
         Self {
             host_id: host_id.into(),
@@ -23,7 +22,6 @@ pub(super) struct WorktreeKey {
 }
 
 impl WorktreeKey {
-    #[cfg(test)]
     pub(super) fn new(project: ProjectKey, worktree_id: impl Into<String>) -> Self {
         Self {
             project,
@@ -39,7 +37,6 @@ pub(super) struct SessionKey {
 }
 
 impl SessionKey {
-    #[cfg(test)]
     pub(super) fn new(worktree: WorktreeKey, session_id: impl Into<String>) -> Self {
         Self {
             worktree,

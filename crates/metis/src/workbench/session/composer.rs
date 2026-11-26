@@ -5,7 +5,7 @@ use std::{
 
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, Render, RenderOnce,
-    Subscription, WeakEntity, Window,
+    SharedString, Subscription, WeakEntity, Window,
     base::{Disableable as _, TestSupportExt as _},
     component::{
         button::{Button, ButtonVariants as _},
@@ -66,7 +66,7 @@ pub(super) struct Composer {
     models: Vec<ModelSpec>,
     stats: StatsInput,
     states: BTreeMap<SessionKey, ComposerSession>,
-    feedback: Option<String>,
+    feedback: Option<SharedString>,
     parent: WeakEntity<Workbench>,
     effects: EffectHandler,
 }
@@ -381,7 +381,6 @@ impl Composer {
     }
 
     // Queue contents are client-local, so injected snapshots must not erase edits.
-    #[cfg(test)]
     pub(super) fn apply_local_queues(&self, projection: &mut super::WorkbenchProjection, cx: &App) {
         for session in &mut projection.sessions {
             if let Some(queue) = self.queue_snapshot(&session.key, cx) {
@@ -453,10 +452,21 @@ impl Composer {
         Some((model_id, effort))
     }
 
-    #[cfg(test)]
     pub(super) fn prune(&mut self, live: &BTreeSet<SessionKey>) {
         self.states.retain(|key, _| live.contains(key));
         self.feedback = None;
+    }
+
+    pub(super) fn show_notices(&mut self, notices: &[String], cx: &mut Context<Self>) {
+        // A bridge batch is already bounded. Replace rather than append so a
+        // repeatedly failing Host cannot grow Composer feedback without limit.
+        self.feedback = Some(notices.join("\n").into());
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(super) fn feedback(&self) -> Option<String> {
+        self.feedback.as_ref().map(ToString::to_string)
     }
 
     #[cfg(test)]
@@ -514,7 +524,7 @@ impl Composer {
                 current.key == call && matches!(current.approval, ApprovalState::Pending)
             });
         if self.connection != ConnectionState::Online || !is_current_pending {
-            self.feedback = Some("Approval is stale or Offline; no decision was sent.".to_owned());
+            self.feedback = Some("Approval is stale or Offline; no decision was sent.".into());
             cx.notify();
             return;
         }
@@ -526,10 +536,10 @@ impl Composer {
         self.feedback = Some(match result {
             EffectResult::Recorded => {
                 "Approval intent recorded locally; Host acceptance and execution remain unknown."
-                    .to_owned()
+                    .into()
             }
             EffectResult::Unavailable => {
-                "No Host connection is attached; the approval was not sent.".to_owned()
+                "No Host connection is attached; the approval was not sent.".into()
             }
         });
         cx.notify();
@@ -550,11 +560,11 @@ impl Composer {
             &text,
         ) else {
             self.feedback = Some(if self.connection == ConnectionState::Offline {
-                "Offline: Send and Queue are unavailable; the draft is preserved.".to_owned()
+                "Offline: Send and Queue are unavailable; the draft is preserved.".into()
             } else if text.trim().is_empty() {
-                "Write a message before sending.".to_owned()
+                "Write a message before sending.".into()
             } else {
-                "Select an available Model and a valid Effort before sending.".to_owned()
+                "Select an available Model and a valid Effort before sending.".into()
             });
             cx.notify();
             return;
@@ -609,9 +619,9 @@ impl Composer {
             self.schedule_queue_sync(None, None, window, cx);
         }
         self.feedback = Some(if recorded {
-            "Intent recorded locally; no Host acceptance or execution is claimed.".to_owned()
+            "Intent recorded locally; no Host acceptance or execution is claimed.".into()
         } else {
-            "No Host connection is attached; the draft was not sent.".to_owned()
+            "No Host connection is attached; the draft was not sent.".into()
         });
         cx.notify();
     }
@@ -748,7 +758,7 @@ impl Render for Composer {
                                 .id(format!("approval-reason-{call_id}"))
                                 .test_support()
                                 .text_color(tokens.metis.foreground_secondary)
-                                .child(Label::new(reason))
+                                .child(Label::new(reason.as_ref()))
                         })),
                 )
                 .child(
@@ -836,6 +846,13 @@ impl Render for Composer {
                             )
                     }))
             }))
+            .children(feedback.map(|feedback| {
+                div()
+                    .id("composer-feedback")
+                    .test_support()
+                    .text_color(tokens.metis.foreground_secondary)
+                    .child(Label::new(feedback))
+            }))
             .child(
                 div()
                     .id("composer-card")
@@ -890,11 +907,6 @@ impl Render for Composer {
                     ),
             )
             .children(stats_dock)
-            .children(feedback.map(|feedback| {
-                div()
-                    .text_color(tokens.metis.foreground_secondary)
-                    .child(feedback)
-            }))
     }
 }
 

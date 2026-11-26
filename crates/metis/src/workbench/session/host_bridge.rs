@@ -19,8 +19,9 @@ use crate::workbench::history::ApprovalDecision;
 /// Notice delivery is best-effort; the oldest entries drop first so a broken
 /// Host cannot grow the queue without bound.
 const NOTICE_LIMIT: usize = 8;
+const NOTICE_TEXT_BYTES: usize = 2 * 1024;
+const NOTICE_TOTAL_BYTES: usize = 4 * 1024;
 
-#[allow(dead_code)] // The product entry drains the bridge in the cold-start slice.
 pub(super) struct HostSessionBridge {
     session: SessionKey,
     reducer: HostSessionReducer,
@@ -36,7 +37,6 @@ pub(super) struct HostSessionBridge {
     notices: VecDeque<String>,
 }
 
-#[allow(dead_code)] // The product entry drains the bridge in the cold-start slice.
 impl HostSessionBridge {
     pub(super) fn new(
         session: SessionKey,
@@ -75,6 +75,11 @@ impl HostSessionBridge {
 
     pub(super) fn take_notices(&mut self) -> Vec<String> {
         self.notices.drain(..).collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn cursor(&self) -> Option<i64> {
+        self.reducer.cursor()
     }
 
     /// Production effect handler: `Recorded` means the intent reached the
@@ -191,8 +196,19 @@ impl HostSessionBridge {
         }
     }
 
-    fn push_notice(&mut self, notice: String) {
-        if self.notices.len() >= NOTICE_LIMIT {
+    fn push_notice(&mut self, mut notice: String) {
+        if notice.len() > NOTICE_TEXT_BYTES {
+            let mut boundary = NOTICE_TEXT_BYTES;
+            while !notice.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            notice.truncate(boundary);
+            notice.push('…');
+        }
+        while self.notices.len() >= NOTICE_LIMIT
+            || self.notices.iter().map(String::len).sum::<usize>() + notice.len()
+                > NOTICE_TOTAL_BYTES
+        {
             self.notices.pop_front();
         }
         self.notices.push_back(notice);
@@ -326,6 +342,28 @@ mod tests {
     fn send_intent(fixture: &Fixture, intent: SessionIntent) -> EffectResult {
         let handler = HostSessionBridge::effect_handler(&fixture.bridge);
         (handler.borrow_mut())(intent)
+    }
+
+    #[test]
+    fn notices_have_utf8_safe_entry_and_total_byte_budgets() {
+        let fixture = fixture();
+        fixture
+            .bridge
+            .borrow_mut()
+            .push_notice("界".repeat(NOTICE_TEXT_BYTES));
+        let notice = fixture.bridge.borrow_mut().take_notices().remove(0);
+        assert!(notice.len() <= NOTICE_TEXT_BYTES + '…'.len_utf8());
+        assert!(notice.ends_with('…'));
+
+        for _ in 0..NOTICE_LIMIT * 2 {
+            fixture
+                .bridge
+                .borrow_mut()
+                .push_notice("x".repeat(NOTICE_TEXT_BYTES));
+        }
+        let notices = fixture.bridge.borrow_mut().take_notices();
+        assert!(notices.len() <= NOTICE_LIMIT);
+        assert!(notices.iter().map(String::len).sum::<usize>() <= NOTICE_TOTAL_BYTES);
     }
 
     #[test]

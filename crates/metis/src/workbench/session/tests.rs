@@ -43,10 +43,10 @@ fn session_projection(id: &str) -> SessionProjection {
     let key = session(id);
     let call = ToolCallProjection {
         key: ToolCallKey::new(key.clone(), "call-1"),
-        title: "read_file".to_owned(),
-        arguments: "/workspace/a/long/path.rs".to_owned(),
-        cwd: Some("/workspace".to_owned()),
-        reason: Some("Verify the current Host snapshot before accepting changes.".to_owned()),
+        title: "read_file".into(),
+        arguments: "/workspace/a/long/path.rs".into(),
+        cwd: Some("/workspace".into()),
+        reason: Some("Verify the current Host snapshot before accepting changes.".into()),
         execution: ExecutionState::NotExecuted,
         approval: ApprovalState::NotRequested,
         output: None,
@@ -59,11 +59,11 @@ fn session_projection(id: &str) -> SessionProjection {
         items: Rc::new(vec![
             TimelineItem::User {
                 id: "user-1".to_owned(),
-                text: "请检查这个文件".to_owned(),
+                text: "请检查这个文件".into(),
             },
             TimelineItem::Model {
                 id: "model-1".to_owned(),
-                markdown: "我会先阅读文件，再保留现有行为。".to_owned(),
+                markdown: "我会先阅读文件，再保留现有行为。".into(),
             },
             TimelineItem::Tool(call),
         ]),
@@ -145,7 +145,7 @@ fn decided_preview() -> WorkbenchProjection {
     };
     call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
     call.execution = ExecutionState::Running;
-    call.output = Some("Host output arrives on the original call.".to_owned());
+    call.output = Some("Host output arrives on the original call.".into());
     projection
 }
 
@@ -858,7 +858,7 @@ fn approval_completion_does_not_replay_queue_or_append_messages(cx: &mut TestApp
     };
     call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
     call.execution = ExecutionState::Succeeded;
-    call.output = Some("Host confirmed completion.".to_owned());
+    call.output = Some("Host confirmed completion.".into());
 
     for next in [submitting, running, succeeded] {
         replace(&mut cx, &view, next);
@@ -933,7 +933,7 @@ fn reconnect_does_not_replay_queue_or_revive_stale_approval(cx: &mut TestAppCont
     };
     call.approval = ApprovalState::Stale;
     call.execution = ExecutionState::Unknown;
-    call.output = Some("Execution: Unknown · Not replayed".to_owned());
+    call.output = Some("Execution: Unknown · Not replayed".into());
     replace(&mut cx, &view, reconnected);
     assert!(
         intents.borrow().is_empty(),
@@ -1038,7 +1038,7 @@ fn user_messages_have_no_author_label_and_use_locatable_bubbles(cx: &mut TestApp
     else {
         panic!("user fixture");
     };
-    *text = long_message.clone();
+    *text = long_message.clone().into();
     let (handle, _view, _) = open_preview(cx, projection);
     let mut cx = visual(handle, cx);
     settle(&mut cx);
@@ -1162,7 +1162,7 @@ fn approval_source_reveals_offscreen_tool_and_restores_its_logical_focus(cx: &mu
     let history = (0..30)
         .map(|index| TimelineItem::User {
             id: format!("history-{index}"),
-            text: format!("历史消息 {index}"),
+            text: format!("历史消息 {index}").into(),
         })
         .collect::<Vec<_>>();
     Rc::make_mut(&mut projection.sessions[0].items).splice(0..0, history);
@@ -1215,6 +1215,80 @@ fn approval_source_reveals_offscreen_tool_and_restores_its_logical_focus(cx: &mu
     );
     cx.update(|window, _| {
         assert_eq!(window.find("tool-call-1-summary").focused(), Some(true));
+    });
+}
+
+#[test]
+fn startup_diagnostics_bound_large_remote_errors_at_a_utf8_boundary() {
+    let error = LocalSessionError::Client {
+        operation: "project/open",
+        source: Box::new(metis::client::ClientError::Remote {
+            code: "remote".to_owned(),
+            message: "界".repeat(STATUS_NOTICE_BYTES),
+            details: serde_json::Value::Null,
+        }),
+    };
+    let notice = bounded_status(format!("Local Host startup failed: {error}"));
+    assert!(notice.len() <= STATUS_NOTICE_BYTES + '…'.len_utf8());
+    assert!(notice.as_str().ends_with('…'));
+}
+
+#[gpui_kit::test]
+fn host_notices_are_visible_without_accumulating_stale_feedback(cx: &mut TestAppContext) {
+    let (handle, view, _) = open_preview(cx, preview());
+    let mut cx = visual(handle, cx);
+    let composer = view.read_with(&cx, |view, _| {
+        view.composer.clone().expect("preview Composer")
+    });
+    cx.update(|_, cx| {
+        composer.update(cx, |composer, cx| {
+            composer.show_notices(
+                &[
+                    "first Host failure".to_owned(),
+                    "second Host failure".to_owned(),
+                ],
+                cx,
+            );
+        });
+    });
+    settle(&mut cx);
+    assert_eq!(
+        composer.read_with(&cx, |composer, _| composer.feedback()),
+        Some("first Host failure\nsecond Host failure".to_owned())
+    );
+    cx.update(|window, _| {
+        let painted = test_support::texts(window);
+        assert!(
+            painted
+                .iter()
+                .any(|text| text.text().contains("first Host failure")),
+            "{painted:?}"
+        );
+        assert!(
+            painted
+                .iter()
+                .any(|text| text.text().contains("second Host failure"))
+        );
+    });
+
+    cx.update(|_, cx| {
+        composer.update(cx, |composer, cx| {
+            composer.show_notices(&["replacement Host failure".to_owned()], cx);
+        });
+    });
+    settle(&mut cx);
+    cx.update(|window, _| {
+        let painted = test_support::texts(window);
+        assert!(
+            painted
+                .iter()
+                .any(|text| text.text().contains("replacement Host failure"))
+        );
+        assert!(
+            !painted
+                .iter()
+                .any(|text| text.text().contains("first Host failure"))
+        );
     });
 }
 
@@ -1452,7 +1526,7 @@ fn session_theme_switch_preserves_draft_selection_scroll_focus_and_entities(
     let extra = (0..24)
         .map(|index| TimelineItem::User {
             id: format!("history-{index}"),
-            text: format!("历史消息 {index} · a long reading row"),
+            text: format!("历史消息 {index} · a long reading row").into(),
         })
         .collect::<Vec<_>>();
     Rc::make_mut(&mut projection.sessions[0].items).splice(0..0, extra);

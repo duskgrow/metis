@@ -6,10 +6,13 @@ mod host_projection;
 mod navigation;
 mod timeline;
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::{cell::RefCell, fmt::Write as _, rc::Rc};
 
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Render, Window,
+    App, AppContext as _, Context, Entity, FocusHandle, Render, SharedString, Subscription, Task,
+    Window,
     base::TestSupportExt as _,
     component::{ThemeMode, button::Button, tree::TreeState},
     div,
@@ -22,11 +25,16 @@ use super::{
     history::{
         ApprovalDecision, FocusAnchor, MainView, NavigationSnapshot, NavigationState, Region,
     },
-    identity::{SessionKey, SubagentKey, ToolCallKey},
+    identity::{ProjectKey, SessionKey, SubagentKey, ToolCallKey, WorktreeKey},
     stats::StatsInput,
     theme::{ResolvedTokens, ThemeController},
 };
 use composer::Composer;
+use host_bridge::HostSessionBridge;
+use metis::{
+    runtime::DshSupervisor,
+    session_transport::{LocalSession, LocalSessionConfig, LocalSessionError, SessionTransport},
+};
 use navigation::SessionNavigation;
 use timeline::SessionTimeline;
 
@@ -37,6 +45,17 @@ const SESSION_HEADER_WIDTH: f32 = 820.;
 const COMPOSER_REGION_HEIGHT: f32 = 192.;
 const COMPOSER_APPROVAL_HEIGHT: f32 = 320.;
 const COMPOSER_QUEUE_HEIGHT: f32 = 384.;
+const STATUS_NOTICE_BYTES: usize = 4 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    static COLD_START_RESULTS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn cold_start_result_count() -> usize {
+    COLD_START_RESULTS.with(Cell::get)
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum ConnectionState {
@@ -76,24 +95,26 @@ pub(super) enum ApprovalState {
     Stale,
 }
 
+pub(super) type SharedText = Rc<str>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ToolCallProjection {
     pub(super) key: ToolCallKey,
-    pub(super) title: String,
-    pub(super) arguments: String,
-    pub(super) cwd: Option<String>,
-    pub(super) reason: Option<String>,
+    pub(super) title: SharedText,
+    pub(super) arguments: SharedText,
+    pub(super) cwd: Option<SharedText>,
+    pub(super) reason: Option<SharedText>,
     pub(super) execution: ExecutionState,
     pub(super) approval: ApprovalState,
-    pub(super) output: Option<String>,
+    pub(super) output: Option<SharedText>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum TimelineItem {
     #[allow(dead_code)] // Supplied by Host projections.
-    User { id: String, text: String },
+    User { id: String, text: SharedText },
     #[allow(dead_code)] // Supplied by Host projections.
-    Model { id: String, markdown: String },
+    Model { id: String, markdown: SharedText },
     #[allow(dead_code)] // Supplied by Host projections.
     Tool(ToolCallProjection),
 }
@@ -268,7 +289,6 @@ impl MainViewController {
         }
     }
 
-    #[cfg(test)]
     fn replace_projection(
         &mut self,
         projection: &WorkbenchProjection,
@@ -378,6 +398,27 @@ enum ResolvedFocus {
     Tree(Entity<TreeState>),
 }
 
+struct ActiveHost {
+    local: LocalSession,
+    transport: Option<SessionTransport>,
+    bridge: Rc<RefCell<HostSessionBridge>>,
+    pump: Option<Task<()>>,
+}
+
+impl Drop for ActiveHost {
+    fn drop(&mut self) {
+        // Stop waiting before closing the transport; its close signal also
+        // releases a pump that is already inside a background receive.
+        self.pump.take();
+        if let Some(transport) = &mut self.transport {
+            transport.close_and_join();
+        }
+        if let Err(error) = self.local.shutdown() {
+            tracing::warn!(%error, "failed to stop the local Workbench Host");
+        }
+    }
+}
+
 pub(crate) struct Workbench {
     theme: ThemeController,
     projection: WorkbenchProjection,
@@ -386,14 +427,40 @@ pub(crate) struct Workbench {
     timeline: Option<Entity<SessionTimeline>>,
     composer: Option<Entity<Composer>>,
     header_focus: FocusHandle,
-    #[cfg(test)]
     effects: EffectHandler,
+    host: Option<ActiveHost>,
+    status_notice: Option<SharedString>,
+    quit_subscription: Option<Subscription>,
 }
 
 impl Workbench {
-    pub(crate) fn offline(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn cold_start(
+        config: LocalSessionConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let effects: EffectHandler = Rc::new(RefCell::new(|_| EffectResult::Unavailable));
-        Self::new(WorkbenchProjection::default(), &effects, window, cx)
+        let mut this = Self::new(WorkbenchProjection::default(), &effects, window, cx);
+        this.status_notice = Some("Starting the local Host; no Session is available yet.".into());
+        this.quit_subscription = Some(cx.on_app_quit(|this, _| {
+            this.host.take();
+            async {}
+        }));
+        cx.spawn_in(window, async move |this, cx| {
+            let prepared = cx
+                .background_executor()
+                .spawn(
+                    async move { LocalSession::start_ephemeral(&DshSupervisor::system(), &config) },
+                )
+                .await;
+            #[cfg(test)]
+            COLD_START_RESULTS.with(|count| count.set(count.get() + 1));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.attach_local(prepared, window, cx);
+            });
+        })
+        .detach();
+        this
     }
 
     pub(super) fn new(
@@ -443,8 +510,101 @@ impl Workbench {
             timeline,
             composer,
             header_focus: cx.focus_handle(),
-            #[cfg(test)]
             effects: Rc::clone(effects),
+            host: None,
+            status_notice: None,
+            quit_subscription: None,
+        }
+    }
+
+    fn attach_local(
+        &mut self,
+        prepared: Result<LocalSession, LocalSessionError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let local = match prepared {
+            Ok(local) => local,
+            Err(error) => {
+                self.status_notice = Some(bounded_status(format!(
+                    "Local Host startup failed: {error}"
+                )));
+                cx.notify();
+                return;
+            }
+        };
+        let project = local.project();
+        let session = SessionKey::new(
+            WorktreeKey::new(
+                ProjectKey::new("local", project.project_id.clone()),
+                project.path.clone(),
+            ),
+            local.session_id(),
+        );
+        let mut transport = local.spawn_transport();
+        let events = transport.take_events().expect("new transport events");
+        let wake = transport.take_wake().expect("new transport wake");
+        let bridge = Rc::new(RefCell::new(HostSessionBridge::new(
+            session,
+            transport.commands(),
+            events,
+        )));
+        self.effects = HostSessionBridge::effect_handler(&bridge);
+        let pump = cx.spawn_in(window, async move |this, cx| {
+            let mut wake = wake;
+            loop {
+                #[cfg(not(test))]
+                let awake = wake.recv().await.is_some();
+                #[cfg(test)]
+                let awake = {
+                    // GPUI's deterministic scheduler rejects cross-thread
+                    // wakes. Poll the same channel without registering one.
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(5))
+                        .await;
+                    !matches!(
+                        wake.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+                    )
+                };
+                if !awake {
+                    break;
+                }
+                if this.update_in(cx, Workbench::drain_host).is_err() {
+                    break;
+                }
+            }
+        });
+        self.host = Some(ActiveHost {
+            local,
+            transport: Some(transport),
+            bridge,
+            pump: Some(pump),
+        });
+        self.status_notice = Some("Connecting to the local Host…".into());
+        self.drain_host(window, cx);
+    }
+
+    fn drain_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(host) = &self.host else {
+            return;
+        };
+        let (projection, notices) = {
+            let mut bridge = host.bridge.borrow_mut();
+            (bridge.poll(), bridge.take_notices())
+        };
+        if let Some(projection) = projection {
+            self.status_notice = None;
+            self.replace_projection(projection, window, cx);
+        }
+        if notices.is_empty() {
+            return;
+        }
+        if let Some(composer) = &self.composer {
+            composer.update(cx, |composer, cx| composer.show_notices(&notices, cx));
+        } else {
+            self.status_notice = Some(bounded_status(notices.join("\n")));
+            cx.notify();
         }
     }
 
@@ -652,8 +812,7 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Injection seam for a future Host subscription and deterministic tests.
-    #[cfg(test)]
+    /// Replace Host facts while preserving native per-Session UI state.
     fn replace_projection(
         &mut self,
         mut projection: WorkbenchProjection,
@@ -858,7 +1017,7 @@ impl Render for Workbench {
             },
         );
         let connection = match self.projection.connection {
-            ConnectionState::Online => "Online · injected projection",
+            ConnectionState::Online => "Online · Host connected",
             ConnectionState::Offline => "Offline · Host actions unavailable",
         };
         let composer_height = current.as_ref().map_or(COMPOSER_REGION_HEIGHT, |session| {
@@ -1036,11 +1195,24 @@ impl Render for Workbench {
                                     }),
                                 )),
                         ),
-                        None => Some(div().absolute().left_0().right_0().top(px(SESSION_HEADER_HEIGHT)).bottom_0().items_center().justify_center().p_8().child(
-                            div().text_color(tokens.metis.foreground_secondary).child(
-                                "No Host is connected. No Session or execution is being simulated.",
-                            ),
-                        )),
+                        None => Some(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .top(px(SESSION_HEADER_HEIGHT))
+                                .bottom_0()
+                                .items_center()
+                                .justify_center()
+                                .p_8()
+                                .child(
+                                    div()
+                                        .text_color(tokens.metis.foreground_secondary)
+                                        .child(self.status_notice.clone().unwrap_or_else(|| {
+                                            SharedString::new_static("No Host is connected. No Session or execution is being simulated.")
+                                        })),
+                                ),
+                        ),
                     }),
             )
     }
@@ -1058,6 +1230,18 @@ fn navigation_snapshot(
         }
     }
     snapshot
+}
+
+fn bounded_status(mut notice: String) -> SharedString {
+    if notice.len() > STATUS_NOTICE_BYTES {
+        let mut boundary = STATUS_NOTICE_BYTES;
+        while !notice.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        notice.truncate(boundary);
+        notice.push('…');
+    }
+    notice.into()
 }
 
 pub(super) fn logical_id(kind: &str, parts: &[&str]) -> String {
@@ -1080,5 +1264,7 @@ pub(super) fn session_id(session: &SessionKey) -> String {
     )
 }
 
+#[cfg(test)]
+mod cold_start_tests;
 #[cfg(test)]
 mod tests;

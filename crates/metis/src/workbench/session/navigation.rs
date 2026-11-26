@@ -143,7 +143,6 @@ impl SessionNavigation {
         self.filter_focus.clone()
     }
 
-    #[cfg(test)]
     pub(super) fn hosts_changed(&self, projection: &WorkbenchProjection) -> bool {
         self.hosts != collect_hosts(projection)
     }
@@ -180,7 +179,6 @@ impl SessionNavigation {
         self.rebuild(projection, Some(selected), true, cx);
     }
 
-    #[cfg(test)]
     pub(super) fn replace_projection(
         &mut self,
         projection: &WorkbenchProjection,

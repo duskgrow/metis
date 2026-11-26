@@ -34,7 +34,6 @@ pub(super) enum Region {
     Transcript,
 }
 
-#[cfg(test)]
 pub(super) const DIFF_ENTRY_ITEM_ID: &str = "worktree-diff";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,7 +58,6 @@ impl FocusAnchor {
     }
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ScrollAnchor {
     pub(super) item_id: String,
@@ -154,7 +152,6 @@ pub(super) struct NavigationState {
     back_entries: Vec<HistoryEntry>,
     forward_entries: Vec<HistoryEntry>,
     session_locals: BTreeMap<SessionKey, SessionLocalState>,
-    #[cfg(test)]
     subagent_scrolls: BTreeMap<SubagentKey, ScrollAnchor>,
 }
 
@@ -170,12 +167,10 @@ impl NavigationState {
             back_entries: Vec::new(),
             forward_entries: Vec::new(),
             session_locals: BTreeMap::from([(session, local)]),
-            #[cfg(test)]
             subagent_scrolls: BTreeMap::new(),
         }
     }
 
-    #[cfg(test)]
     pub(super) fn prune(&mut self, snapshot: &NavigationSnapshot) {
         self.session_locals
             .retain(|key, _| snapshot.sessions.contains(key));
@@ -279,7 +274,6 @@ impl NavigationState {
 
     /// Restore a deep link. Invalid intent is discarded in favor of the known
     /// fallback Session instead of revealing a cross-owner or stale target.
-    #[cfg(test)]
     pub(super) fn restore(&mut self, view: MainView, snapshot: &NavigationSnapshot) -> bool {
         if !snapshot.contains_view(&view) {
             self.fallback_to_session(snapshot);
@@ -359,7 +353,6 @@ impl NavigationState {
         })
     }
 
-    #[cfg(test)]
     fn set_source_focus(&mut self, target: &MainView) {
         let focus = match (&self.current.view, target) {
             (MainView::Session(current), MainView::Diff { origin, .. }) if current == origin => {

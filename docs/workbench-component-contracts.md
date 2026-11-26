@@ -9,11 +9,11 @@
 - 纯行为与本地状态：[`identity.rs`](../crates/metis/src/workbench/identity.rs)、[`stats.rs`](../crates/metis/src/workbench/stats.rs)、[`history.rs`](../crates/metis/src/workbench/history.rs)、[`focus.rs`](../crates/metis/src/workbench/focus.rs)。
 - 主题与基础适配：[`theme.rs`](../crates/metis/src/workbench/theme.rs)、[`markdown.rs`](../crates/metis/src/workbench/markdown.rs)、[`disclosure.rs`](../crates/metis/src/workbench/disclosure.rs)。
 - 原生 Session 纵切：[`session.rs`](../crates/metis/src/workbench/session.rs)及其 `session/` 子模块；Host 快照与有序事件的纯适配位于 [`host_projection.rs`](../crates/metis/src/workbench/session/host_projection.rs)，交互覆盖从 [Session 测试](../crates/metis/src/workbench/session/tests.rs)和 [review 测试](../crates/metis/src/workbench/session/review_tests.rs)进入。
-- Host 接入：异步传输 owner 位于 [`session_transport.rs`](../crates/metis/src/session_transport.rs)，负责连接、follow 与 `$events` 原样转发和 prompt/审批命令；UI 线程桥接位于 [`host_bridge.rs`](../crates/metis/src/workbench/session/host_bridge.rs)，把事件喂入 reducer 生成投影并给出生产 effect。真实 Host 提示词与审批闭环见 [`session_transport.rs` 集成测试](../crates/metis/tests/session_transport.rs)。
+- Host 接入：[`session_transport.rs`](../crates/metis/src/session_transport.rs)负责本地 Host／项目／Session 冷启动准备、连接、follow 与 `$events` 原样转发和 prompt/审批命令；UI 线程桥接位于 [`host_bridge.rs`](../crates/metis/src/workbench/session/host_bridge.rs)，把事件喂入 reducer 生成投影并给出生产 effect。真实 Host 提示词与审批闭环见 [`session_transport.rs` 集成测试](../crates/metis/tests/session_transport.rs)，产品入口冷启动、通知和关闭清理见 [`cold_start_tests.rs`](../crates/metis/src/workbench/session/cold_start_tests.rs)。
 
-[产品入口](../crates/metis/src/main.rs)只创建离线 `Workbench`，显示真实 Offline 空状态；交互 preview 仅由测试注入投影和 effect，不是产品运行模式。Host 纯投影适配器复用 `SessionJournal` 校验顺序并保留原始审批请求；`SessionTransport` 拥有异步连接，`HostSessionBridge` 生成投影并提供生产 effect，Send/Queue 目前只提交提示词文本，模型与 effort 选择、Queue 的 Host 语义和断线自动重连尚未实现，产品入口也尚未接入桥接。`FocusTopology` 的方向移动只有纯模型，未绑定产品键位；Diff 与只读 Subagent 仍只有纯历史／归属模型和来源返回壳，不是完整原生 UI。
+[产品入口](../crates/metis/src/main.rs)启动私有 Host，打开启动时所在目录并创建 Session，再通过桥接更新真实投影；启动失败保持 Offline，关闭时清理传输与 Host。交互 preview 仅由测试注入投影和 effect，不是产品运行模式。Host 纯投影适配器复用 `SessionJournal` 校验顺序并保留原始审批请求；Send/Queue 目前只提交提示词文本，模型与 effort 选择、Queue 的 Host 语义、添加项目流程和断线自动重连尚未实现。由于模型投影为空，原生 Composer 的提示词动作仍不可用。`FocusTopology` 的方向移动只有纯模型，未绑定产品键位；Diff 与只读 Subagent 仍只有纯历史／归属模型和来源返回壳，不是完整原生 UI。
 
-已有纯行为测试、Session 测试、组件 headless probes 和传输层真实 Host 集成测试通过，具体覆盖以测试代码为准。这些证据不代表 Workbench 产品流程已接入真实 Host，也不覆盖完整 Diff/Subagent UI、Queue 的真实 Host 提交或完整冷启动；高对比、200% 缩放、真实 IME、真实辅助技术、性能与完整原生视觉验收仍未完成。本文继续是 Draft 工程契约，局部落地不自动晋升 Stable。
+已有纯行为测试、Session 测试、组件 headless probes、产品入口真实 Host 冷启动测试和传输层真实 Host 集成测试通过，具体覆盖以测试代码为准。这些证据不覆盖完整 Diff/Subagent UI、原生 Composer 的真实 Host 提交、Queue 的真实 Host 提交或完整冷启动；高对比、200% 缩放、真实 IME、真实辅助技术、性能与完整原生视觉验收仍未完成。本文继续是 Draft 工程契约，局部落地不自动晋升 Stable。
 
 ## 1. 规范来源与冲突处理
 
@@ -139,7 +139,7 @@ Activity 只描述完整 Session 的执行活动与耗时；Usage 只描述 toke
 - **方向焦点**：区域顺序、动态区域、Overlay scope 与历史锚点恢复，详见 [`focus.rs`](../crates/metis/src/workbench/focus.rs)。
 - **Host 投影**：真实协议形状的快照、连续事件、重连窗口、Surface 替换、审批代际与歧义、恢复错误码和有界 Timeline，详见 [`host_projection.rs`](../crates/metis/src/workbench/session/host_projection.rs)。
 
-这些结果只证明本地模型行为，不证明真实 Host 提交或原生交互。Host 投影测试也不证明产品入口已订阅 Host，或已完成分页、淘汰恢复和性能验收；仍需异步 owner、生产 effect、headless 集成和真实 Host/OS 验收。
+这些结果只证明本地模型行为，不证明真实 Host 提交或原生交互。产品入口已订阅 Host，局部 Session 与传输测试不能证明分页、淘汰恢复、完整冷启动或性能验收已经完成；仍需真实 Host/OS 验收。
 
 ### 7.2 组件 probe 与原生验收状态
 
@@ -147,19 +147,19 @@ Activity 只描述完整 Session 的执行活动与耗时；Usage 只描述 toke
 
 1. **Theme / assets**：已有生产 `ThemeController` 的有损投影、Light/Dark 重载、状态保留和选择性图标来源测试；Light/Dark 的真实帧已按第 9 项复核，高对比与文本缩放仍按第 5 项验收。
 2. **Focus / Disclosure / Tree / Popover**：已有纯焦点模型及菜单、弹层、Disclosure、Session 的 headless 覆盖。`FocusMove` 尚无产品键位绑定，不能声称方向性键盘主流程已完成；仍需验证真实焦点恢复以及 Tree 重建、Overlay 关闭后的行为。
-3. **Streaming / tool identity**：已有流式 Markdown、阅读位置和 Session intent／同一工具卡覆盖；Queue 编辑／取消、审批完成及注入重连快照后不重放也已有 headless 覆盖。真实 Host 提交、提交中断连、真实重连代际与其他客户端事件仍未完成。
+3. **Streaming / tool identity**：已有流式 Markdown、阅读位置和 Session intent／同一工具卡覆盖；Queue 编辑／取消、审批完成及注入重连快照后不重放也已有 headless 覆盖。原生 Composer 的真实 Host 提交、提交中断连、真实重连代际与其他客户端事件仍未完成。
 4. **Markdown security**：已有生产 `AgentMarkdown` 的 raw HTML、链接确认与图片拒绝 headless probe；这不扩展为 OS 桌面集成或原生视觉验收。
 5. **200% 中文、长路径、窄布局与 DPI**：未完成。需在 200% 或平台上限验证内容和动作可达、局部滚动及焦点／选区／滚动锚点保留，并覆盖高对比和减少动效。
 6. **真实 IME**：未完成。需在 Composer 的流式更新、弹层和 Session 切换中验证 preedit、候选提交、选区与剪贴板；里程碑 0 的 GPUI Kit IME 结果和无头输入结果均不能替代此项。
 7. **真实辅助技术**：未完成。先做语义快照，再在目标平台用真实辅助技术验证核心任务、非颜色状态、焦点事件及 Transcript／状态／通知的分离。
 8. **有界历史、流式与大文件性能**：参考平台、输入规模、warmed baseline 和延迟／内存／重建预算已预登记在[性能验收测试定义](../crates/metis/tests/workbench_performance.rs)；实际测量未完成。常规 CI 只编译并跳过这些定义，签署前必须实现测量体、在参考平台运行并记录结果，不得以“交互可用”等主观表述代替记录。大文件定义只覆盖 Editor 组件，不能据此关闭受当前 Host 文本上限约束的产品流程验收。
 9. **少量受控原生视觉证据**：局部 Session 已完成，完整原生视觉验收仍未完成。2026-11-26 在 NixOS 的隔离 Sway headless Wayland 会话中，使用 Mesa lavapipe Vulkan、固定 CJK 字体和 1 倍缩放，先运行 `direnv exec . cargo build -p metis --bin metis`，再以 `direnv exec . node target/native-workbench-visual.mjs` 启动未入库的一次性 harness（环境变量选择状态和尺寸），由其调用 `grim -o HEADLESS-1 <临时 PNG>`。人工对照已确认原型，覆盖 1440×900 的 Dark/Light Session、1120×760 的审批加 Queue、以及 Offline/Stale；导航层级、审批 cwd/reason/来源入口、Queue、Composer 工具行与统计均可见，Offline 动作禁用。未覆盖原生弹层、成功/拒绝展开、多 Worktree、Diff/Subagent、焦点环视觉和真实输入。一次性 harness 与 PNG 在审查后删除，headless 断言未充当视觉证据。
-10. **完整冷启动**：未完成。当前 Offline 空状态和局部 Session preview 不能替代环境准备、添加项目、会话到差异审查的完整流程。
+10. **完整冷启动**：未完成。产品入口的真实 Host headless 测试已覆盖当前目录的环境准备、项目打开、Session 创建、Online 投影、通知、启动失败、启动中关闭，以及传输／Host／临时状态清理；添加／选择项目、原生提示词与差异审查尚未贯通，局部 Session preview 和这些生命周期测试也不能替代完整流程的 OS 验收。
 
 局部实现的保留偏差已经体验与工程双评审，范围和回收条件如下：
 
 - 阅读轴目前保留 User/Model/Tool 平铺；完整 Turn → Process → Tool 和 Test/Review 结果槽在真实 Host projection 接入时实现，并验证运行、失败、停止与渐进展开，不提前晋升 Stable。
-- Diff/Subagent 仍只有模型与来源返回壳；对应原生阶段补齐主视图、焦点和 Session 状态恢复。Header 的真实路径/分支、Host effect 与 Queue 后端行为同样在 Host 阶段接入，当前真实 ID 和本地记录不冒充这些事实。
+- Diff/Subagent 仍只有模型与来源返回壳；对应原生阶段补齐主视图、焦点和 Session 状态恢复。Header 的真实路径/分支、模型选择与 Queue 后端行为同样在对应 Host 阶段接入，当前真实 ID 和本地记录不冒充这些事实。
 - Composer 目前按审批/Queue 模块分档并在溢出时局部滚动，尚未实现原型的内容测量与逐级收缩；后续原生自适应布局落地时回收，200%、窄布局和高 DPI 仍按第 5 项验收。
 - Permission 详情与侧栏底部工具随对应动作流程接入；主题切换 probe 在正式入口定案后移除或替换。
 

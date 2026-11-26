@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::{
     ApprovalState, ExecutionState, SessionKey, SessionPermissionPolicy, SessionProjection,
-    TimelineItem, ToolCallKey, ToolCallProjection,
+    SharedText, TimelineItem, ToolCallKey, ToolCallProjection,
 };
 use crate::workbench::{history::ApprovalDecision, stats::StatsInput};
 
@@ -159,6 +159,11 @@ impl HostSessionReducer {
     /// caller-owned prompt request ids from it.
     pub(super) fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    #[cfg(test)]
+    pub(super) fn cursor(&self) -> Option<i64> {
+        self.journal.cursor()
     }
 
     pub(super) fn projection(&self) -> SessionProjection {
@@ -376,7 +381,7 @@ impl ProjectionState {
             Some("allowed-once") => ApprovalState::Decided(ApprovalDecision::AllowOnce),
             Some("rejected") => ApprovalState::Decided(ApprovalDecision::Reject),
             None if !audit.ambiguous
-                && audit.tool_name == call.title
+                && audit.tool_name.as_str() == call.title.as_ref()
                 && live_request(call, live_approvals).is_some() =>
             {
                 ApprovalState::Pending
@@ -457,7 +462,7 @@ struct SourcedResult {
 struct ApprovalAudit {
     id: String,
     tool_name: String,
-    reason: Option<String>,
+    reason: Option<SharedText>,
     outcome: Option<String>,
     ambiguous: bool,
 }
@@ -487,13 +492,13 @@ enum DomainEvent {
         surface: SurfaceOp,
         call_id: String,
         execution: ExecutionState,
-        output: String,
+        output: SharedText,
     },
     ApprovalAsked {
         id: String,
         call_id: String,
         tool_name: String,
-        reason: Option<String>,
+        reason: Option<SharedText>,
     },
     ApprovalDecided {
         id: String,
@@ -556,9 +561,9 @@ fn parse_event(event: &Value, session: &SessionKey) -> ClientResult<DomainEvent>
                     session: session.clone(),
                     call_id: call_id.to_owned(),
                 },
-                title: required_string(data, "name", "Tool call omitted its name")?.to_owned(),
+                title: required_string(data, "name", "Tool call omitted its name")?.into(),
                 arguments: required_string(data, "arguments", "Tool call omitted its arguments")?
-                    .to_owned(),
+                    .into(),
                 cwd: None,
                 reason: None,
                 execution: ExecutionState::Unknown,
@@ -587,7 +592,8 @@ fn parse_event(event: &Value, session: &SessionKey) -> ClientResult<DomainEvent>
                     "Approval request omitted its tool name",
                 )?
                 .to_owned(),
-                reason: optional_string(data, "reason", "Approval reason was not text")?,
+                reason: optional_string(data, "reason", "Approval reason was not text")?
+                    .map(Into::into),
             })
         }
         Some("approval/decided") => {
@@ -642,7 +648,7 @@ fn parse_tool_result(event: &Value) -> ClientResult<DomainEvent> {
         surface: surface_op(event)?,
         call_id: call_id.to_owned(),
         execution,
-        output: display_content(message)?,
+        output: display_content(message)?.into(),
     })
 }
 
@@ -652,7 +658,7 @@ fn live_request<'a>(
 ) -> Option<&'a ApprovalRequest> {
     let mut candidates = approvals.values().filter(|request| {
         request.request.get("callId").and_then(Value::as_str) == Some(call.key.call_id.as_str())
-            && request.request.get("toolName").and_then(Value::as_str) == Some(call.title.as_str())
+            && request.request.get("toolName").and_then(Value::as_str) == Some(call.title.as_ref())
     });
     let request = candidates.next()?;
     candidates.next().is_none().then_some(request)
@@ -707,11 +713,22 @@ fn assistant_message(message: &Value) -> ClientResult<Option<TimelineItem>> {
     }))
 }
 
-fn text_content(message: &Value) -> ClientResult<String> {
+fn text_content(message: &Value) -> ClientResult<SharedText> {
     let content = message
         .get("content")
         .and_then(Value::as_array)
         .ok_or(ClientError::Protocol("Message omitted its content blocks"))?;
+    if let [block] = content.as_slice()
+        && block.get("type").and_then(Value::as_str) == Some("text")
+    {
+        let part = block
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or(ClientError::Protocol("Text content block omitted its text"))?;
+        // The common cumulative-stream shape needs only the one unavoidable
+        // copy into shared UI storage, not a second temporary String copy.
+        return Ok(Rc::from(part));
+    }
     let mut text = String::new();
     for block in content {
         if block.get("type").and_then(Value::as_str) != Some("text") {
@@ -726,7 +743,7 @@ fn text_content(message: &Value) -> ClientResult<String> {
         }
         text.push_str(part);
     }
-    Ok(text)
+    Ok(text.into())
 }
 
 fn display_content(message: &Value) -> ClientResult<String> {
@@ -1048,6 +1065,59 @@ mod tests {
             .iter()
             .map(TimelineItem::stable_id)
             .collect()
+    }
+
+    #[test]
+    fn streaming_projections_share_unchanged_text_and_replace_changed_text() {
+        let long = "x".repeat(16 * 1024);
+        let mut reducer = reducer();
+        reducer
+            .apply(&snapshot(
+                &[
+                    assistant(0, "stable", &long),
+                    assistant(1, "stream", "part"),
+                ],
+                1,
+                None,
+                false,
+                false,
+            ))
+            .expect("opening snapshot");
+        let first = reducer.projection();
+        let TimelineItem::Model {
+            markdown: stable, ..
+        } = &first.items[0]
+        else {
+            panic!("stable model fixture");
+        };
+        let stable = Rc::clone(stable);
+        let TimelineItem::Model {
+            markdown: changed_before,
+            ..
+        } = &first.items[1]
+        else {
+            panic!("streaming model fixture");
+        };
+        let changed_before = Rc::clone(changed_before);
+
+        let mut latest = None;
+        for seq in 2..20 {
+            reducer
+                .apply(&frame(assistant(seq, "stream", &long)))
+                .expect("streaming update");
+            let projection = reducer.projection();
+            let TimelineItem::Model { markdown, .. } = &projection.items[0] else {
+                panic!("stable model remains first");
+            };
+            assert!(Rc::ptr_eq(&stable, markdown));
+            latest = Some(projection);
+        }
+        let latest = latest.expect("streamed projection");
+        let TimelineItem::Model { markdown, .. } = &latest.items[1] else {
+            panic!("changed model remains second");
+        };
+        assert!(!Rc::ptr_eq(&changed_before, markdown));
+        assert_eq!(markdown.as_ref(), long);
     }
 
     #[test]
@@ -1423,11 +1493,11 @@ mod tests {
         assert!(reducer.approval_request(&call.key, 1).is_none());
         assert!(projection.items.iter().any(|item| matches!(
             item,
-            TimelineItem::Model { id, markdown } if id == "replacement" && markdown == "replacement"
+            TimelineItem::Model { id, markdown } if id == "replacement" && markdown.as_ref() == "replacement"
         )));
         assert!(projection.items.iter().any(|item| matches!(
             item,
-            TimelineItem::Model { id, markdown } if id == "result-replacement" && markdown == "result replaced"
+            TimelineItem::Model { id, markdown } if id == "result-replacement" && markdown.as_ref() == "result replaced"
         )));
     }
 

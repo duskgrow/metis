@@ -249,7 +249,7 @@ fn unchanged_markdown_is_not_set_again_when_projection_or_render_repeats(cx: &mu
     else {
         panic!("Markdown fixture");
     };
-    markdown.push_str("\n\nOnly this message changed.");
+    *markdown = format!("{markdown}\n\nOnly this message changed.").into();
     replace(&mut cx, &view, changed.clone());
     assert_eq!(
         timeline.read_with(&cx, |timeline, _| timeline.markdown_update_count()),
@@ -269,7 +269,7 @@ fn set_markdown(projection: &mut WorkbenchProjection, session_index: usize, text
     else {
         panic!("Markdown fixture");
     };
-    *markdown = text.to_string();
+    *markdown = text.into();
 }
 
 #[gpui_kit::test]
