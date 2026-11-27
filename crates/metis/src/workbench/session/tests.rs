@@ -168,9 +168,45 @@ fn queued_preview() -> WorkbenchProjection {
     projection
 }
 
+/// A Session mid-turn with two queued prompts and no approval in the way, so
+/// only the turn boundary decides whether the Queue drains.
+fn queued_running_preview() -> WorkbenchProjection {
+    let mut projection = preview();
+    projection.sessions[0].execution = ExecutionState::Running;
+    projection.sessions[0].queue = vec![
+        QueueItemProjection {
+            id: "q1".to_owned(),
+            text: "排队：先核对 Host 快照".to_owned(),
+        },
+        QueueItemProjection {
+            id: "q2".to_owned(),
+            text: "排队：保留现有测试".to_owned(),
+        },
+    ];
+    projection
+}
+
+fn ended_queued_preview(execution: ExecutionState) -> WorkbenchProjection {
+    let mut projection = queued_running_preview();
+    projection.sessions[0].execution = execution;
+    projection
+}
+
 fn open_preview(
     cx: &mut TestAppContext,
     projection: WorkbenchProjection,
+) -> (
+    WindowHandle<Root>,
+    Entity<Workbench>,
+    Rc<RefCell<Vec<SessionIntent>>>,
+) {
+    open_preview_with(cx, projection, EffectResult::Recorded)
+}
+
+fn open_preview_with(
+    cx: &mut TestAppContext,
+    projection: WorkbenchProjection,
+    effect: EffectResult,
 ) -> (
     WindowHandle<Root>,
     Entity<Workbench>,
@@ -181,7 +217,7 @@ fn open_preview(
     let recorded = Rc::clone(&intents);
     let effects: EffectHandler = Rc::new(RefCell::new(move |intent| {
         recorded.borrow_mut().push(intent);
-        EffectResult::Recorded
+        effect
     }));
     cx.update(|cx| {
         let (window, view) = gpui_kit::open_window(
@@ -957,6 +993,34 @@ fn queue_cancel_non_last_focuses_next_surviving_item(cx: &mut TestAppContext) {
     assert!(intents.borrow().is_empty(), "cancelling Queue is local");
 }
 
+/// The projection sequence of one approved call: still submitting, then
+/// running, then finished.
+fn approval_completion_previews() -> [WorkbenchProjection; 3] {
+    let mut submitting = queued_preview();
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut submitting.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    call.approval = ApprovalState::Submitting;
+
+    let mut running = queued_preview();
+    running.sessions[0].execution = ExecutionState::Running;
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut running.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
+    call.execution = ExecutionState::Running;
+
+    let mut succeeded = queued_preview();
+    succeeded.sessions[0].execution = ExecutionState::Succeeded;
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut succeeded.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
+    call.execution = ExecutionState::Succeeded;
+    call.output = Some("Host confirmed completion.".into());
+    [submitting, running, succeeded]
+}
+
 #[gpui_kit::test]
 fn approval_completion_does_not_replay_queue_or_append_messages(cx: &mut TestAppContext) {
     let (handle, view, intents) = open_preview(cx, queued_preview());
@@ -988,30 +1052,11 @@ fn approval_completion_does_not_replay_queue_or_append_messages(cx: &mut TestApp
     settle(&mut cx);
     assert_eq!(intents.borrow().len(), 1);
 
-    let mut submitting = queued_preview();
-    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut submitting.sessions[0].items)[2] else {
-        panic!("tool fixture");
-    };
-    call.approval = ApprovalState::Submitting;
+    let [submitting, running, succeeded] = approval_completion_previews();
 
-    let mut running = queued_preview();
-    running.sessions[0].execution = ExecutionState::Running;
-    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut running.sessions[0].items)[2] else {
-        panic!("tool fixture");
-    };
-    call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
-    call.execution = ExecutionState::Running;
-
-    let mut succeeded = queued_preview();
-    succeeded.sessions[0].execution = ExecutionState::Succeeded;
-    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut succeeded.sessions[0].items)[2] else {
-        panic!("tool fixture");
-    };
-    call.approval = ApprovalState::Decided(ApprovalDecision::AllowOnce);
-    call.execution = ExecutionState::Succeeded;
-    call.output = Some("Host confirmed completion.".into());
-
-    for next in [submitting, running, succeeded] {
+    // Approval bookkeeping alone is not dispatchable: nothing leaves the Queue
+    // while a call is still being decided or the Session is still running.
+    for next in [submitting, running] {
         replace(&mut cx, &view, next);
         assert_eq!(
             intents.borrow().len(),
@@ -1038,9 +1083,648 @@ fn approval_completion_does_not_replay_queue_or_append_messages(cx: &mut TestApp
             "completion must not append queued user messages"
         );
     }
+
+    // Once the turn has ended the Session is dispatchable: one Send carrying
+    // the locally edited text, and still no synthesized user message.
+    replace(&mut cx, &view, succeeded.clone());
+    assert_eq!(intents.borrow().len(), 2);
+    match &intents.borrow()[1] {
+        SessionIntent::Send { text, .. } => assert_eq!(text, "本地编辑后的 Queue"),
+        other => panic!("expected Send intent, got {other:?}"),
+    }
+    assert!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .is_empty()),
+        "the dispatched item leaves the Queue"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .items
+            .len()),
+        timeline_len,
+        "completion must not append queued user messages"
+    );
+
+    // The claim holds for the rest of this idle period: a later idle
+    // projection, even one still listing the item, must not submit it again.
+    let mut settled = succeeded;
+    settled.sessions[0].title = "Session one · settled".to_owned();
+    replace(&mut cx, &view, settled);
+    assert_eq!(
+        intents.borrow().len(),
+        2,
+        "an idle projection must not resubmit the dispatched item"
+    );
+    assert!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .is_empty()),
+        "a stale Host snapshot cannot restore a dispatched item"
+    );
     cx.update(|window, _| {
         assert_eq!(window.find("composer-submit").label(), Some("Send"));
     });
+}
+
+#[gpui_kit::test]
+fn queue_dispatches_head_when_the_turn_ends(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_running_preview());
+    let mut cx = visual(handle, cx);
+    cx.update(|window, _| window.activate_window());
+    settle(&mut cx);
+    set_draft(&mut cx, &view, "draft stays put", 0..5);
+    let draft = input(&view, &cx);
+    let dispatched = queue_input(&view, &cx, "q1").entity_id();
+    let retained = queue_input(&view, &cx, "q2").entity_id();
+    assert!(intents.borrow().is_empty(), "watching a turn sends nothing");
+
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+
+    let sent = intents.borrow().clone();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    match &sent[0] {
+        SessionIntent::Send {
+            session: key,
+            text,
+            model,
+            effort,
+        } => {
+            assert_eq!(key, &session("one"));
+            assert_eq!(text, "排队：先核对 Host 快照");
+            assert_eq!(model, "model-a");
+            assert_eq!(effort.as_deref(), Some("Low"));
+        }
+        other => panic!("expected Send intent, got {other:?}"),
+    }
+    let composer = view
+        .read_with(&cx, |view, _| view.composer.clone())
+        .expect("Composer");
+    assert!(
+        composer
+            .read_with(&cx, |composer, cx| composer.queue_input("q1", cx))
+            .is_none(),
+        "the dispatched row leaves the local Queue"
+    );
+    assert_eq!(queue_input(&view, &cx, "q2").entity_id(), retained);
+    assert_ne!(dispatched, retained);
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .clone()),
+        vec![QueueItemProjection {
+            id: "q2".to_owned(),
+            text: "排队：保留现有测试".to_owned(),
+        }]
+    );
+    // A Host-driven update must not take keyboard focus from the Composer
+    // draft; only Cancel restores focus into the Queue.
+    cx.update(|window, cx| {
+        assert!(
+            draft.read(cx).focus_handle(cx).is_focused(window),
+            "dispatch must leave focus in the Composer draft"
+        );
+    });
+    assert_eq!(
+        draft.read_with(&cx, |input, _| input.value()),
+        "draft stays put"
+    );
+    assert_eq!(
+        draft.read_with(&cx, |input, _| input.selected_range()),
+        0..5
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .controller
+            .as_ref()
+            .unwrap()
+            .navigation
+            .focus()
+            .region),
+        Region::Composer,
+        "the logical focus stays on the draft, not the surviving Queue row"
+    );
+}
+
+#[gpui_kit::test]
+fn one_claim_blocks_a_burst_while_idle(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_running_preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    assert_eq!(
+        intents.borrow().len(),
+        1,
+        "the idle turn hands over one row"
+    );
+
+    // Repeated idle projections are still the same idle period: the claim holds
+    // until the Host starts the turn the dispatched prompt asked for.
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    let mut settled = ended_queued_preview(ExecutionState::Failed);
+    settled.sessions[0].title = "Session one · settled".to_owned();
+    replace(&mut cx, &view, settled);
+    assert_eq!(
+        intents.borrow().len(),
+        1,
+        "one claim covers the whole idle period"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .len()),
+        1,
+        "the surviving row is untouched while the claim holds"
+    );
+
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Running),
+    );
+    assert_eq!(
+        intents.borrow().len(),
+        1,
+        "a running turn dispatches nothing"
+    );
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    assert_eq!(intents.borrow().len(), 2);
+    match &intents.borrow()[1] {
+        SessionIntent::Send { text, .. } => assert_eq!(text, "排队：保留现有测试"),
+        other => panic!("expected Send intent, got {other:?}"),
+    }
+    assert!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .is_empty()),
+        "the second row waits for its own idle period"
+    );
+}
+
+#[gpui_kit::test]
+fn reconnect_drains_only_unsubmitted_items(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_running_preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    assert_eq!(intents.borrow().len(), 1);
+
+    // The connection drops before the Host starts the turn: the claim window
+    // closes and nothing was handed over inside it.
+    let mut offline = ended_queued_preview(ExecutionState::Succeeded);
+    offline.connection = ConnectionState::Offline;
+    replace(&mut cx, &view, offline);
+    assert_eq!(intents.borrow().len(), 1, "Offline cannot submit");
+
+    // A reconnect bumps the generation. The dispatched prompt already left the
+    // Queue, so only the never-submitted row drains — never a replay.
+    let mut reconnected = ended_queued_preview(ExecutionState::Succeeded);
+    reconnected.sessions[0].generation = 2;
+    replace(&mut cx, &view, reconnected);
+    assert_eq!(
+        intents.borrow().len(),
+        2,
+        "a reconnect may drain unsubmitted rows"
+    );
+    match &intents.borrow()[1] {
+        SessionIntent::Send { text, .. } => assert_eq!(text, "排队：保留现有测试"),
+        other => panic!("expected Send intent, got {other:?}"),
+    }
+    assert_eq!(
+        intents
+            .borrow()
+            .iter()
+            .filter(|intent| matches!(intent, SessionIntent::Send { text, .. } if text == "排队：先核对 Host 快照"))
+            .count(),
+        1,
+        "the dispatched prompt is never re-sent"
+    );
+    assert!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .is_empty()),
+        "both rows are now with the Host"
+    );
+}
+
+#[gpui_kit::test]
+fn returning_to_an_idle_session_drains_its_queue(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_running_preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_session(session("two"), window, cx);
+        });
+    });
+    settle(&mut cx);
+    // Session one finishes while another Session is on screen.
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    assert!(
+        intents.borrow().is_empty(),
+        "an off-screen Session cannot dispatch"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view.projection.sessions[0].queue.len()),
+        2,
+        "the off-screen Queue is untouched"
+    );
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_session(session("one"), window, cx);
+        });
+    });
+    settle(&mut cx);
+    match &intents.borrow()[..] {
+        [
+            SessionIntent::Send {
+                session: key, text, ..
+            },
+        ] => {
+            assert_eq!(key, &session("one"));
+            assert_eq!(text, "排队：先核对 Host 快照");
+        }
+        other => panic!("expected one Send intent, got {other:?}"),
+    }
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .len()),
+        1,
+        "only the head is dispatched on return"
+    );
+}
+
+#[gpui_kit::test]
+fn first_sight_of_a_queued_session_is_side_effect_free(cx: &mut TestAppContext) {
+    let mut projection = queued_running_preview();
+    projection.sessions[1].execution = ExecutionState::Succeeded;
+    projection.sessions[1].queue = vec![QueueItemProjection {
+        id: "t1".to_owned(),
+        text: "第二个 Session 的 Queue".to_owned(),
+    }];
+    let (handle, view, intents) = open_preview(cx, projection.clone());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.open_session(session("two"), window, cx);
+        });
+    });
+    settle(&mut cx);
+    assert!(
+        intents.borrow().is_empty(),
+        "opening a Session must not submit its Queue"
+    );
+
+    // The same Session is known from here on, so an idle projection drains it.
+    replace(&mut cx, &view, projection);
+    match &intents.borrow()[..] {
+        [SessionIntent::Send { text, .. }] => assert_eq!(text, "第二个 Session 的 Queue"),
+        other => panic!("expected one Send intent, got {other:?}"),
+    }
+}
+
+#[gpui_kit::test]
+fn pending_approval_blocks_queue_dispatch(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_running_preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    let mut waiting = ended_queued_preview(ExecutionState::Succeeded);
+    let TimelineItem::Tool(call) = &mut Rc::make_mut(&mut waiting.sessions[0].items)[2] else {
+        panic!("tool fixture");
+    };
+    call.approval = ApprovalState::Pending;
+    replace(&mut cx, &view, waiting);
+
+    assert!(
+        intents.borrow().is_empty(),
+        "the Host waits for a decision, not a prompt"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .len()),
+        2
+    );
+
+    // Once the approval is decided and the Session is idle again, the same
+    // projection state drains instead of staying blocked forever.
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    assert_eq!(intents.borrow().len(), 1, "a decided approval unblocks");
+}
+
+#[gpui_kit::test]
+fn offline_or_unknown_never_dispatches(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_running_preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Unknown),
+    );
+    assert!(
+        intents.borrow().is_empty(),
+        "an unknown Host state may still be executing"
+    );
+
+    let mut offline = ended_queued_preview(ExecutionState::Succeeded);
+    offline.connection = ConnectionState::Offline;
+    replace(&mut cx, &view, offline);
+    assert!(
+        intents.borrow().is_empty(),
+        "an Offline Composer has no Host to submit to"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .len()),
+        2
+    );
+
+    // Reconnecting onto an idle Session drains without needing a turn edge.
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    assert_eq!(
+        intents.borrow().len(),
+        1,
+        "a later Online idle projection dispatches"
+    );
+}
+
+#[gpui_kit::test]
+fn missing_model_selection_blocks_queue_dispatch(cx: &mut TestAppContext) {
+    let mut running = queued_running_preview();
+    running.sessions[0].models = Vec::new();
+    running.sessions[0].initial_model = None;
+    let (handle, view, intents) = open_preview(cx, running);
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    let mut ended = ended_queued_preview(ExecutionState::Succeeded);
+    ended.sessions[0].models = Vec::new();
+    ended.sessions[0].initial_model = None;
+    replace(&mut cx, &view, ended);
+
+    assert!(
+        intents.borrow().is_empty(),
+        "the Session is still Model unavailable"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .len()),
+        2,
+        "an unselectable Model retains the item"
+    );
+
+    // The Host later publishes Models for the Session; the same idle state then
+    // dispatches the retained head.
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    match &intents.borrow()[..] {
+        [SessionIntent::Send { text, .. }] => assert_eq!(text, "排队：先核对 Host 快照"),
+        other => panic!("expected one Send intent, got {other:?}"),
+    }
+}
+
+#[gpui_kit::test]
+fn blank_queue_head_is_not_sent(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, queued_running_preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    let first = queue_input(&view, &cx, "q1");
+    cx.update(|window, cx| {
+        first.update(cx, |input, cx| input.set_value("", window, cx));
+    });
+    settle(&mut cx);
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    assert!(
+        intents.borrow().is_empty(),
+        "an emptied queued row must not submit an empty prompt"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .len()),
+        2,
+        "the blank row stays queued"
+    );
+
+    // Filling the row makes it dispatchable: the next idle projection hands it
+    // over instead of waiting for a turn edge that already passed.
+    set_queue_text(&mut cx, &view, "q1", "补上的内容");
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    match &intents.borrow()[..] {
+        [SessionIntent::Send { text, .. }] => assert_eq!(text, "补上的内容"),
+        other => panic!("expected one Send intent, got {other:?}"),
+    }
+}
+
+#[gpui_kit::test]
+fn dispatch_and_retry_preserve_the_item_when_the_effect_is_unavailable(cx: &mut TestAppContext) {
+    let (handle, view, intents) =
+        open_preview_with(cx, queued_running_preview(), EffectResult::Unavailable);
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    // `drain_host` replaces the projection first and writes the Host's own
+    // notices right after it in the same update; the deferred dispatch notice
+    // must not overwrite that answer.
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.replace_projection(ended_queued_preview(ExecutionState::Succeeded), window, cx);
+            let composer = view.composer.clone().expect("Composer");
+            composer.update(cx, |composer, cx| {
+                composer.show_notices(&["Host notice".to_owned()], cx);
+            });
+        });
+    });
+    settle(&mut cx);
+    let composer = view
+        .read_with(&cx, |view, _| view.composer.clone())
+        .expect("Composer");
+    assert_eq!(intents.borrow().len(), 1, "the head was attempted");
+    assert_eq!(
+        composer.read_with(&cx, |composer, _| composer.feedback()),
+        Some("Host notice".to_owned()),
+        "a deferred dispatch notice must not overwrite a Host notice"
+    );
+    assert_eq!(
+        view.read_with(&cx, |view, _| view
+            .current_projection()
+            .unwrap()
+            .queue
+            .len()),
+        2,
+        "the item is kept for a retry"
+    );
+
+    // No claim was taken, so the next idle projection retries and reports
+    // honestly on its own.
+    replace(
+        &mut cx,
+        &view,
+        ended_queued_preview(ExecutionState::Succeeded),
+    );
+    assert_eq!(
+        intents.borrow().len(),
+        2,
+        "an unrecorded dispatch is retried"
+    );
+    let feedback = composer.read_with(&cx, |composer, _| composer.feedback());
+    assert!(
+        feedback.as_deref().is_some_and(|text| {
+            text.contains("was not submitted to the Host") && text.contains("stays in the Queue")
+        }),
+        "an unavailable dispatch is reported honestly: {feedback:?}"
+    );
+}
+
+/// The seam a turn-edge rule loses: prompts queued from the draft while the
+/// Host runs are local until the Session is dispatchable again, and then one
+/// claim hands over exactly one of them.
+#[gpui_kit::test]
+fn queued_from_the_draft_is_dispatched_after_the_turn(cx: &mut TestAppContext) {
+    let mut running = preview();
+    running.sessions[0].execution = ExecutionState::Running;
+    let (handle, view, intents) = open_preview(cx, running);
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    for text in ["第一条排队的草稿", "第二条排队的草稿"] {
+        set_draft(&mut cx, &view, text, 0..2);
+        cx.update(|window, cx| {
+            assert_eq!(window.find("composer-submit").label(), Some("Queue"));
+            window.click("composer-submit", cx);
+        });
+        settle(&mut cx);
+    }
+
+    let first_id = format!("{}:queue-intent:1", session_id(&session("one")));
+    let second_id = format!("{}:queue-intent:2", session_id(&session("one")));
+    match &intents.borrow()[..] {
+        [
+            SessionIntent::Queue { item_id: first, .. },
+            SessionIntent::Queue {
+                item_id: second, ..
+            },
+        ] => {
+            assert_eq!(first, &first_id);
+            assert_eq!(second, &second_id);
+        }
+        other => panic!("expected two Queue intents, got {other:?}"),
+    }
+    assert_eq!(
+        queue_input(&view, &cx, &second_id).read_with(&cx, |input, _| input.value()),
+        "第二条排队的草稿",
+        "the rows stay local while the Host is running"
+    );
+    assert_eq!(intents.borrow().len(), 2, "Queueing never submits");
+
+    // The idle snapshot carries no rows of its own; the local Queue survives and
+    // one dispatchable projection hands over its head exactly once.
+    let mut ended = preview();
+    ended.sessions[0].execution = ExecutionState::Succeeded;
+    replace(&mut cx, &view, ended);
+    match &intents.borrow()[..] {
+        [_, _, SessionIntent::Send { text, .. }] => assert_eq!(text, "第一条排队的草稿"),
+        other => panic!("expected one Send intent, got {other:?}"),
+    }
+    let queue = view.read_with(&cx, |view, _| {
+        view.current_projection().unwrap().queue.clone()
+    });
+    assert_eq!(
+        queue,
+        vec![QueueItemProjection {
+            id: second_id,
+            text: "第二条排队的草稿".to_owned(),
+        }],
+        "the dispatched row leaves the local Queue in FIFO order"
+    );
+
+    // The claim covers the rest of this idle period.
+    let mut again = preview();
+    again.sessions[0].execution = ExecutionState::Succeeded;
+    replace(&mut cx, &view, again);
+    assert_eq!(
+        intents.borrow().len(),
+        3,
+        "an idle snapshot must not hand over the next row"
+    );
 }
 
 #[gpui_kit::test]

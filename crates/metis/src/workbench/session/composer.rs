@@ -41,6 +41,10 @@ struct QueueItemState {
 struct ComposerSession {
     input: Entity<TextareaState>,
     queue: Vec<QueueItemState>,
+    /// Guards the window between handing a prompt to the transport and the Host
+    /// starting its turn: while it is set, a further idle projection is the same
+    /// idle period, not a new chance to hand over the next row.
+    dispatch_claim: bool,
     queue_focus: FocusHandle,
     menu_focus: FocusHandle,
     stats_focus: BTreeMap<StatsDomain, FocusHandle>,
@@ -94,7 +98,7 @@ impl Composer {
             parent,
             effects,
         };
-        this.set_session(projection, connection, window, cx);
+        this.ensure_state(projection, window, cx);
         this
     }
 
@@ -105,6 +109,10 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Only a Session whose Composer state already exists may drain, which
+        // keeps construction and the first sight of a Session side-effect free.
+        // A switch back to a known idle Session still hands its Queue head over.
+        let dispatchable_session = self.states.contains_key(&projection.key);
         self.session = projection.key.clone();
         self.connection = connection;
         self.generation = projection.generation;
@@ -115,7 +123,114 @@ impl Composer {
         self.stats = projection.stats.clone();
         self.feedback = None;
         self.ensure_state(projection, window, cx);
+        if dispatchable_session {
+            self.adopt_default_model(projection);
+            self.drain_queue(window, cx);
+        }
         cx.notify();
+    }
+
+    /// Hand at most the Queue head to the Host whenever the Session is
+    /// dispatchable. Level-triggered: every projection of an idle Session may
+    /// drain, and one claim then holds until the Host starts the turn.
+    fn drain_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The claim only guards the window between handing a prompt to the
+        // transport and the Host starting its turn. Once that window closes —
+        // the connection left Online, or a turn is in flight — the next idle
+        // projection may hand over the next row.
+        if (self.connection != ConnectionState::Online || !execution_is_idle(self.execution))
+            && let Some(state) = self.states.get_mut(&self.session)
+        {
+            state.dispatch_claim = false;
+        }
+        if self.connection != ConnectionState::Online
+            || self.approval.is_some()
+            || !execution_is_idle(self.execution)
+            || self
+                .states
+                .get(&self.session)
+                .is_none_or(|state| state.dispatch_claim)
+        {
+            return;
+        }
+        // An empty or blank head is retried by a later projection: nothing was
+        // handed over, so no claim is taken.
+        let Some(head) = self
+            .queue_head(cx)
+            .filter(|head| !head.text.trim().is_empty())
+        else {
+            return;
+        };
+        let Some((model, effort)) = self.current_selection() else {
+            return;
+        };
+        // No generation or observed-edge gate: an item leaves the Queue the
+        // moment its prompt is handed to the transport, so a reconnect or a
+        // session switch cannot replay it and only never-submitted items drain.
+        let result = (self.effects.borrow_mut())(SessionIntent::Send {
+            session: self.session.clone(),
+            text: head.text,
+            model,
+            effort,
+        });
+        match result {
+            EffectResult::Recorded => {
+                self.remove_dispatched_item(&head.id, window, cx);
+                if let Some(state) = self.states.get_mut(&self.session) {
+                    state.dispatch_claim = true;
+                }
+            }
+            // Unavailable also covers a bounded transport channel that was
+            // full, not only a missing connection: the row stays queued and the
+            // next projection retries it. The replacement that delivered this
+            // projection may still write a Host notice afterwards, so only fill
+            // an empty notice slot.
+            EffectResult::Unavailable => {
+                let this = cx.weak_entity();
+                window.defer(cx, move |_, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.feedback.is_some() {
+                            return;
+                        }
+                        this.feedback = Some(
+                            "The queued message was not submitted to the Host; it stays in the Queue."
+                                .into(),
+                        );
+                        cx.notify();
+                    });
+                });
+            }
+        }
+    }
+
+    /// A Session first seen without any Model offer keeps no selection; adopt
+    /// the projection's default once Models appear so the Queue can drain. An
+    /// explicit selection is never replaced.
+    fn adopt_default_model(&mut self, projection: &SessionProjection) {
+        let Some(state) = self.states.get_mut(&self.session) else {
+            return;
+        };
+        if state.model_id.is_some() {
+            return;
+        }
+        let model = projection
+            .initial_model
+            .as_ref()
+            .and_then(|model_id| projection.models.iter().find(|model| &model.id == model_id))
+            .or_else(|| projection.models.first());
+        let Some(model) = model else {
+            return;
+        };
+        state.model_id = Some(model.id.clone());
+        state.effort.clone_from(&model.default_effort);
+    }
+
+    fn queue_head(&self, cx: &App) -> Option<QueueHead> {
+        let head = self.states.get(&self.session)?.queue.first()?;
+        Some(QueueHead {
+            id: head.id.clone(),
+            text: head.input.read(cx).value().to_string(),
+        })
     }
 
     fn new_queue_item(
@@ -304,6 +419,7 @@ impl Composer {
             ComposerSession {
                 input,
                 queue,
+                dispatch_claim: false,
                 queue_focus,
                 menu_focus: cx.focus_handle(),
                 stats_focus,
@@ -423,7 +539,29 @@ impl Composer {
             .get(index)
             .or_else(|| state.queue.last())
             .map(|item| item.id.clone());
+        // Cancel is a user action on the focused row, so focus lands on the row
+        // that takes its place, seeded from the removed anchor.
         self.schedule_queue_sync(Some(item_id.to_owned()), focus_item, window, cx);
+        cx.notify();
+    }
+
+    /// A dispatched row leaves the Queue without any focus restoration: the
+    /// Host-driven update that delivered the projection must not take keyboard
+    /// focus from the Composer draft.
+    fn remove_dispatched_item(
+        &mut self,
+        item_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.states.get_mut(&self.session) else {
+            return;
+        };
+        let Some(index) = state.queue.iter().position(|item| item.id == item_id) else {
+            return;
+        };
+        state.queue.remove(index);
+        self.schedule_queue_sync(None, None, window, cx);
         cx.notify();
     }
 
@@ -1120,6 +1258,26 @@ fn stats_disclosure(
             .update(cx, |composer, cx| composer.toggle_stats(domain, open, cx))
             .expect("composer owner is alive");
     })
+}
+
+struct QueueHead {
+    id: String,
+    text: String,
+}
+
+/// States in which the Host has no turn in flight. `Unknown` is excluded on
+/// purpose: an unknown Host state may still be executing, so submitting there
+/// would race the Host instead of waiting for the turn to end — fail closed.
+/// Manual Send stays available in `Unknown` because a human can judge the
+/// state; automated dispatch must not.
+fn execution_is_idle(execution: ExecutionState) -> bool {
+    matches!(
+        execution,
+        ExecutionState::NotExecuted
+            | ExecutionState::Succeeded
+            | ExecutionState::Failed
+            | ExecutionState::Stopped
+    )
 }
 
 pub(super) fn action_kind(execution: ExecutionState, approval_pending: bool) -> ComposerAction {

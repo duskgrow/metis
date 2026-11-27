@@ -95,8 +95,9 @@ impl HostSessionBridge {
         self.reducer.cursor()
     }
 
-    /// Production effect handler: `Recorded` means the intent reached the
-    /// bounded transport queue, never that the Host accepted it.
+    /// Production effect handler: `Recorded` means the intent was kept
+    /// locally or handed to the bounded transport queue, never that the Host
+    /// accepted it.
     pub(super) fn effect_handler(bridge: &Rc<RefCell<Self>>) -> EffectHandler {
         let bridge = Rc::clone(bridge);
         Rc::new(RefCell::new(move |intent| {
@@ -178,11 +179,19 @@ impl HostSessionBridge {
             return EffectResult::Unavailable;
         }
         let command = match intent {
+            // A queued item is a client-local record: the Composer owns the
+            // queue and the Host learns about the prompt only when a later
+            // step dispatches it as a Send.
+            SessionIntent::Queue { session, .. } => {
+                if session != self.session {
+                    return EffectResult::Unavailable;
+                }
+                return EffectResult::Recorded;
+            }
             // Model and effort stay local for now: the Host client has no
             // selection RPC yet, so only the prompt text is submitted. The
-            // request id is caller-owned so a later retry can reuse it.
-            SessionIntent::Send { session, text, .. }
-            | SessionIntent::Queue { session, text, .. } => {
+            // request id is minted per prompt from the client-scoped counter.
+            SessionIntent::Send { session, text, .. } => {
                 if session != self.session {
                     return EffectResult::Unavailable;
                 }
@@ -505,57 +514,110 @@ mod tests {
     }
 
     #[test]
-    fn send_and_queue_intents_forward_prompts_only_for_the_bound_session() {
+    fn queue_intent_records_locally_without_a_prompt() {
         let mut fixture = fixture();
-        connect(&fixture);
-        fixture.bridge.borrow_mut().poll();
-
-        for intent in [
-            SessionIntent::Send {
-                session: session_key(),
-                text: "send text".to_owned(),
-                model: "model".to_owned(),
-                effort: Some("high".to_owned()),
-            },
-            SessionIntent::Queue {
-                session: session_key(),
-                item_id: "queue-1".to_owned(),
-                text: "queued text".to_owned(),
-                model: "model".to_owned(),
-                effort: None,
-            },
-        ] {
-            assert_eq!(send_intent(&fixture, intent), EffectResult::Recorded);
-        }
         assert_eq!(
             send_intent(
                 &fixture,
-                SessionIntent::Send {
-                    session: SessionKey::new(
-                        WorktreeKey::new(ProjectKey::new("host", "project"), "worktree"),
-                        "other-session",
-                    ),
-                    text: "misrouted".to_owned(),
-                    model: String::new(),
+                SessionIntent::Queue {
+                    session: session_key(),
+                    item_id: "offline-queue".to_owned(),
+                    text: "offline text".to_owned(),
+                    model: "model".to_owned(),
                     effort: None,
                 }
             ),
             EffectResult::Unavailable
         );
 
-        for (text, suffix) in [("send text", "1"), ("queued text", "2")] {
+        connect(&fixture);
+        fixture.bridge.borrow_mut().poll();
+
+        assert_eq!(
+            send_intent(
+                &fixture,
+                SessionIntent::Queue {
+                    session: session_key(),
+                    item_id: "queue-1".to_owned(),
+                    text: "queued text".to_owned(),
+                    model: "model".to_owned(),
+                    effort: Some("high".to_owned()),
+                }
+            ),
+            EffectResult::Recorded
+        );
+        assert!(fixture.commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_and_send_reject_a_foreign_session() {
+        let mut fixture = fixture();
+        connect(&fixture);
+        fixture.bridge.borrow_mut().poll();
+
+        let foreign = SessionKey::new(
+            WorktreeKey::new(ProjectKey::new("host", "project"), "worktree"),
+            "other-session",
+        );
+        for intent in [
+            SessionIntent::Send {
+                session: foreign.clone(),
+                text: "send text".to_owned(),
+                model: "model".to_owned(),
+                effort: None,
+            },
+            SessionIntent::Queue {
+                session: foreign,
+                item_id: "queue-1".to_owned(),
+                text: "queued text".to_owned(),
+                model: "model".to_owned(),
+                effort: None,
+            },
+        ] {
+            assert_eq!(send_intent(&fixture, intent), EffectResult::Unavailable);
+        }
+        assert!(fixture.commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn send_still_uses_a_fresh_request_id_per_prompt() {
+        let mut fixture = fixture();
+        connect(&fixture);
+        fixture.bridge.borrow_mut().poll();
+
+        let mut request_ids = Vec::new();
+        for text in ["first text", "second text"] {
+            assert_eq!(
+                send_intent(
+                    &fixture,
+                    SessionIntent::Send {
+                        session: session_key(),
+                        text: text.to_owned(),
+                        model: "model".to_owned(),
+                        effort: None,
+                    }
+                ),
+                EffectResult::Recorded
+            );
             match fixture.commands.try_recv() {
                 Ok(TransportCommand::Prompt {
                     request_id,
                     text: actual,
                 }) => {
                     assert_eq!(actual, text);
-                    assert_eq!(request_id, format!("metis-prompt-client-a-{suffix}"));
+                    assert!(request_id.starts_with("metis-prompt-"));
+                    request_ids.push(request_id);
                 }
                 other => panic!("expected prompt command, got {other:?}"),
             }
         }
-        assert!(fixture.commands.try_recv().is_err());
+        assert_eq!(
+            request_ids,
+            vec![
+                "metis-prompt-client-a-1".to_owned(),
+                "metis-prompt-client-a-2".to_owned(),
+            ]
+        );
     }
 
     #[test]

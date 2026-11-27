@@ -214,6 +214,9 @@ pub(super) enum SessionIntent {
         model: String,
         effort: Option<String>,
     },
+    /// Recorded client-locally: the Composer owns the queue, so this intent
+    /// sends no Host command and `Recorded` does not mean the Host accepted
+    /// the prompt. Dispatch later re-uses `Send`.
     Queue {
         session: SessionKey,
         item_id: String,
