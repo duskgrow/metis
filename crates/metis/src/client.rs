@@ -132,6 +132,7 @@ pub struct Project {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalRequest {
     pub client_id: String,
+    /// Opaque correlation ID delivered at most once within this client generation.
     pub event_id: String,
     pub agent_id: String,
     /// Original Host approval request after transport-only Agent/signal removal.
@@ -234,6 +235,30 @@ impl Drop for DshStream {
     }
 }
 
+/// The `$events` stream split from its [`DshClient`], retaining the opaque
+/// client generation so approval correlation stays exact.
+pub struct HostEvents {
+    stream: DshStream,
+    client_id: String,
+}
+
+impl HostEvents {
+    /// Read and parse one forwarded Host event.
+    pub async fn next(&mut self) -> ClientResult<HostEvent> {
+        let value = self
+            .stream
+            .next()
+            .await?
+            .ok_or(ClientError::ConnectionClosed)?;
+        parse_host_event(&value, &self.client_id)
+    }
+
+    /// Cancel the logical stream. Dropping the handle has the same effect.
+    pub fn cancel(&mut self) {
+        self.stream.cancel();
+    }
+}
+
 /// Authenticated public dsh client sharing one WebSocket across logical streams.
 pub struct DshClient {
     http: reqwest::Client,
@@ -244,7 +269,7 @@ pub struct DshClient {
     next_id: AtomicU64,
     commands: mpsc::Sender<MuxCommand>,
     shared: Arc<MuxShared>,
-    events: DshStream,
+    events: Option<DshStream>,
     client_id: String,
     task: Option<JoinHandle<()>>,
 }
@@ -332,7 +357,7 @@ impl DshClient {
             next_id,
             commands: command_sender,
             shared,
-            events,
+            events: Some(events),
             client_id,
             task: Some(task),
         })
@@ -383,6 +408,21 @@ impl DshClient {
             )
             .await?;
         required_text(&value, "content", "project/read response omitted content")
+    }
+
+    /// Replace one existing UTF-8 file in a Host project.
+    pub async fn write_project_file(
+        &self,
+        project_id: &str,
+        path: &str,
+        content: &str,
+    ) -> ClientResult<()> {
+        self.rpc(
+            "project/write",
+            json!({ "request": { "projectId": project_id, "path": path, "content": content } }),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Return the project's UTF-8 porcelain-v1, NUL-delimited Git status.
@@ -563,12 +603,22 @@ impl DshClient {
 
     /// Read and parse one forwarded Host event.
     pub async fn next_event(&mut self) -> ClientResult<HostEvent> {
-        let value = self
-            .events
-            .next()
-            .await?
-            .ok_or(ClientError::ConnectionClosed)?;
+        let events = self.events.as_mut().ok_or(ClientError::Protocol(
+            "the $events stream was split from this client",
+        ))?;
+        let value = events.next().await?.ok_or(ClientError::ConnectionClosed)?;
         parse_host_event(&value, &self.client_id)
+    }
+
+    /// Split the `$events` stream out so event reads and RPC calls can make
+    /// progress concurrently on independent tasks. The stream keeps the opaque
+    /// generation id; afterwards `next_event` fails instead of reading twice.
+    pub fn take_events(&mut self) -> Option<HostEvents> {
+        let stream = self.events.take()?;
+        Some(HostEvents {
+            stream,
+            client_id: self.client_id.clone(),
+        })
     }
 
     /// Answer one approval through the `$events/result` unary endpoint.
@@ -589,7 +639,9 @@ impl DshClient {
 
     /// Close the physical socket and wait for its task and logical streams to finish.
     pub async fn close(mut self) -> ClientResult<()> {
-        self.events.cancel();
+        if let Some(events) = &mut self.events {
+            events.cancel();
+        }
         if timeout(
             self.config.request_timeout,
             self.commands.send(MuxCommand::Close),

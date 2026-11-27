@@ -44,6 +44,8 @@ fmt:
 lint: _js-install
     cargo fmt --all -- --check
     dprint check
+    # --all-targets unifies dev-only GPUI features; check the normal binary too.
+    cargo check --bin metis
     cargo clippy --workspace --all-targets -- -D warnings
     pnpm --filter @metis/dsh-host typecheck
     actionlint -ignore 'SC2086' -ignore 'SC2129'
@@ -65,6 +67,18 @@ headless-package: _js-install
 # Extract the latest headless archive and exercise Host, sessions and real Git without display libraries
 headless-smoke: headless-package
     node scripts/smoke-headless.mjs
+
+# Exercise a real Editor through isolated Wayland, Fcitx5, cross-process clipboard and native pixels
+native-editor-smoke:
+    node scripts/smoke-native-editor.mjs
+
+# Run the same native Editor acceptance in an Ubuntu 24.04 Docker environment
+native-editor-smoke-ubuntu:
+    node scripts/smoke-native-editor-ubuntu.mjs
+
+# Run opt-in Workbench performance acceptance on the preregistered reference runner
+perf-workbench:
+    cargo nextest run --release -p metis --test workbench_performance --run-ignored all -j 1
 
 # Build docs (rustdoc warnings are errors; RUSTDOCFLAGS injected at the top of this file)
 doc:

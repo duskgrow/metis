@@ -41,8 +41,10 @@ this section is the process gate over the assembled PR.
 ## 2. Docs co-evolution (same PR, not a follow-up)
 
 - Behavior, commands, flags, or config changed → README / CONTRIBUTING /
-  AGENTS.md / snapshots updated **in this PR**? The English version is
-  canonical; `*.zh-CN.md` translations follow it.
+  AGENTS.md / snapshots updated **in this PR**? Documents under `docs/` are
+  written directly in Chinese. External README/CONTRIBUTING portals use the
+  Chinese `*.zh-CN.md` file as canonical and update the English translation in
+  the same PR.
 - New hand-written prose must pass the three-question filter: can code state
   it (delete or generate)? Does it answer _why_ (ADR/explanation)? Is it an
   entry point (runnable command)? Anything else is a future drift source.
@@ -55,7 +57,17 @@ this section is the process gate over the assembled PR.
 - Snapshots are approved by humans via `just snapshot-review`; the agent
   prepares and explains the diff, the human accepts.
 
-## 4. Commits are version intent
+## 4. Workbench UI (when touched)
+
+- Run `workbench-ui` at the level matching the diff. Local changes need no
+  design brief; new reusable or cross-surface patterns need their at-most-one-
+  page brief and focused reviews. Existing ADR and release rules govern public
+  contracts independently.
+- Check that evidence is proportional: affected states and representative
+  content, not a universal screenshot/platform matrix. Exceptions need a scope
+  and removal condition.
+
+## 5. Commits are version intent
 
 - The modified Conventional Commits convention (`type(scope): subject`, ASCII
   subject, ≤100-char header — see CONTRIBUTING.md) must match real semver
@@ -78,14 +90,14 @@ this section is the process gate over the assembled PR.
 - No agent-attribution footers (`Co-Authored-By`, `Generated-with`) in
   commits or PRs — see AGENTS.md.
 
-## 5. ADR necessity (judgment call)
+## 6. ADR necessity (judgment call)
 
 Add an ADR under `docs/decisions/` when the change is architecturally
 significant: a new layer or boundary, a new external contract, a replaced
 core dependency, a reversed previous decision. When referencing a past
 decision, cite the number (`see ADR-0003`) — never restate its rationale.
 
-## 6. Security & boundary pass
+## 7. Security & boundary pass
 
 - New third-party dependency in the diff? It must have gone through the
   `adding-dependencies` skill (and the human said yes).
@@ -94,7 +106,7 @@ decision, cite the number (`see ADR-0003`) — never restate its rationale.
 - `unsafe` code is forbidden workspace-wide; if the diff somehow needs it,
   stop and escalate.
 
-## 7. Verdict
+## 8. Verdict
 
 Report a checklist with pass/fail per section. Any failure: fix it before
 opening the PR, or explicitly flag it to the human with a recommendation.

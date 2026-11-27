@@ -214,6 +214,12 @@ impl DshRuntime {
         self.id
     }
 
+    /// PID of the Node.js Host, once its identity has been reported during startup.
+    #[must_use]
+    pub fn host_process_id(&self) -> Option<u32> {
+        self.host_identity.map(|identity| identity.pid)
+    }
+
     /// The local dsh Host root.
     #[must_use]
     pub fn web_url(&self) -> &str {

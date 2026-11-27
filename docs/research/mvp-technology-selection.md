@@ -32,4 +32,12 @@ GPUI Kit 自带的 Git 历史示例通过 `std::process::Command` 调用 `git --
 
 ## 验证边界
 
-以上结论来自源码、发布记录和官方文档。本机尚未编译或运行这些组件；中文输入法、Linux 与 NixOS 图形环境、异步事件桥接及 Harness 行为均以里程碑 0 的实际验证为准。
+以上结论来自源码、发布记录和官方文档。选型时尚未实测的能力以里程碑 0 的持续验收为准。
+
+2026-11-22 已将 Host 返回的真实 Git 工作区新增、修改、删除和重命名 patch 交给 Diff，并在同一工作区依赖栈的无头窗口中验证可见源码行、重命名文件头及 Unified/Split 行列布局；这不覆盖原生图形会话中的像素渲染。
+
+同日在同一依赖栈中验证 Editor：真实无头窗口从 Rust 源码生成 Tree-sitter 折叠候选并接受键盘输入，高亮后端产生不同的关键字与字符串样式；编辑后的文本经 Host 原子写入并读回一致，项目路径外、外部符号链接和超限内容的写入均被拒绝。这些结果不覆盖原生图形会话中的像素渲染。
+
+同日在真实 TextView 无头窗口中分段追加未闭合粗体和 Rust 代码围栏，验证 Markdown 源与渲染文本更新，并记录到可见代码行。组件的 Tail 跟随在底部随追加移动，上滚后追加保持逻辑滚动位置，回到底部后恢复跟随；这不覆盖原生图形会话中的像素渲染。
+
+2026-11-23 在 NixOS 和 Ubuntu 24.04 容器中，以 Sway headless、Mesa lavapipe Vulkan 和独立 Fcitx5 会话验收真实 Wayland Editor。`just native-editor-smoke` 与 `just native-editor-smoke-ubuntu` 会通过虚拟键盘输入拼音，检查 preedit、首选候选“你好”的提交和原生输出像素；独立的 `wl-copy` 提供粘贴来源，`wl-paste` 读回 Editor 复制的内容，避免应用内自写自读造成假阳性。验收保存截图、日志与合成器版本。Ubuntu 24.04 自带的 Sway 1.9 缺少 input-popup-v2 场景支持，无法显示 Wayland 输入法候选窗，因此容器使用脚本固定并校验的新 Sway/wlroots；这些构建依赖只属于验收环境。Fcitx5 和 wl-clipboard 只是外部验收工具，产品仍只使用 Wayland 文本输入与剪贴板协议。该结果不覆盖实体 GPU 和其他合成器；X11 对照在 `zed-xim` 的首条消息解析处失败，与 [Zed #54959](https://github.com/zed-industries/zed/issues/54959) 相同。该议题由报告者以“未计划”关闭，没有关联修复 PR，不能视为已修复。

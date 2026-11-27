@@ -1,0 +1,526 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
+
+use gpui_kit::{
+    App, AppContext as _, Context, Entity, FocusHandle, Render, RenderOnce, Subscription,
+    WeakEntity, Window,
+    base::TestSupportExt as _,
+    component::{
+        button::Button,
+        label::Label,
+        message_scroller::{MessageScroller, MessageScrollerState},
+        text::TextViewState,
+    },
+    div,
+    prelude::*,
+    px, relative,
+};
+
+use super::{
+    ApprovalDecision, ApprovalState, ExecutionState, FocusAnchor, MainView, Region, ResolvedTokens,
+    SessionKey, SessionProjection, TimelineItem, ToolCallProjection, Workbench, session_id,
+};
+use crate::workbench::markdown::{AgentMarkdown, LinkConfirmation};
+
+struct TimelineSession {
+    items: Rc<Vec<TimelineItem>>,
+    scroller: Entity<MessageScrollerState>,
+    markdown: BTreeMap<String, Entity<TextViewState>>,
+    item_ids: Vec<String>,
+    tool_focus: BTreeMap<String, FocusHandle>,
+    open_tools: BTreeSet<String>,
+    _scroll_subscription: Subscription,
+}
+
+pub(super) struct SessionTimeline {
+    session: SessionKey,
+    items: Rc<Vec<TimelineItem>>,
+    states: BTreeMap<SessionKey, TimelineSession>,
+    focus: FocusHandle,
+    pending_link: Arc<Mutex<Option<String>>>,
+    parent: WeakEntity<Workbench>,
+    #[cfg(test)]
+    markdown_set_text_calls: usize,
+}
+
+impl SessionTimeline {
+    pub(super) fn new(
+        projection: &SessionProjection,
+        parent: WeakEntity<Workbench>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self {
+            session: projection.key.clone(),
+            items: Rc::new(Vec::new()),
+            states: BTreeMap::new(),
+            focus: cx.focus_handle(),
+            pending_link: Arc::new(Mutex::new(None)),
+            parent,
+            #[cfg(test)]
+            markdown_set_text_calls: 0,
+        };
+        this.set_session(projection, cx);
+        this
+    }
+
+    pub(super) fn set_session(&mut self, projection: &SessionProjection, cx: &mut Context<Self>) {
+        self.session = projection.key.clone();
+        self.items = Rc::clone(&projection.items);
+        self.pending_link
+            .lock()
+            .expect("lock pending Markdown link")
+            .take();
+        self.ensure_state(projection, cx);
+        let Some(state) = self.states.get_mut(&self.session) else {
+            return;
+        };
+        let previous_items = std::mem::replace(&mut state.items, Rc::clone(&projection.items));
+        let previous_markdown = previous_items
+            .iter()
+            .filter_map(|item| match item {
+                TimelineItem::Model { id, markdown } => Some((id.as_str(), markdown)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let item_ids = self
+            .items
+            .iter()
+            .map(TimelineItem::stable_id)
+            .collect::<Vec<_>>();
+        let old_count = state.scroller.read(cx).item_count();
+        state.item_ids = item_ids;
+        for item in self.items.iter() {
+            match item {
+                TimelineItem::Model { id, markdown } => {
+                    let key = format!("model:{id}");
+                    if let Some(text) = state.markdown.get(&key) {
+                        let changed = previous_markdown.get(id.as_str()).is_none_or(|previous| {
+                            !Rc::ptr_eq(previous, markdown)
+                                && previous.as_ref() != markdown.as_ref()
+                        });
+                        if changed {
+                            #[cfg(test)]
+                            {
+                                self.markdown_set_text_calls += 1;
+                            }
+                            text.update(cx, |text, cx| text.set_text(markdown, cx));
+                        }
+                    } else {
+                        let text = cx.new(|cx| TextViewState::markdown(markdown, cx));
+                        state.markdown.insert(key, text);
+                    }
+                }
+                TimelineItem::Tool(call) => {
+                    state
+                        .tool_focus
+                        .entry(call.key.call_id.clone())
+                        .or_insert_with(|| cx.focus_handle());
+                }
+                TimelineItem::User { .. } => {}
+            }
+        }
+        if old_count == self.items.len() {
+            for index in previous_items
+                .iter()
+                .zip(self.items.iter())
+                .enumerate()
+                .filter(|(_, (previous, current))| previous != current)
+                .map(|(index, _)| index)
+            {
+                state.scroller.update(cx, |scroller, cx| {
+                    scroller.remeasure_items(index..index + 1, cx);
+                });
+            }
+        } else {
+            let new_count = self.items.len();
+            state.scroller.update(cx, |scroller, cx| {
+                scroller.splice(0..old_count, new_count, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn ensure_state(&mut self, projection: &SessionProjection, cx: &mut Context<Self>) {
+        if self.states.contains_key(&projection.key) {
+            return;
+        }
+        let key = projection.key.clone();
+        let scroller = cx.new(|cx| MessageScrollerState::new(projection.items.len(), cx));
+        let scroll_subscription = cx.observe(&scroller, |_, _, cx| cx.notify());
+        self.states.insert(
+            key,
+            TimelineSession {
+                items: Rc::new(Vec::new()),
+                scroller,
+                markdown: BTreeMap::new(),
+                item_ids: Vec::new(),
+                tool_focus: BTreeMap::new(),
+                open_tools: BTreeSet::new(),
+                _scroll_subscription: scroll_subscription,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn scroller_state(&self, _: &App) -> Entity<MessageScrollerState> {
+        self.states
+            .get(&self.session)
+            .expect("current Timeline state")
+            .scroller
+            .clone()
+    }
+
+    pub(super) fn prune(&mut self, live: &BTreeSet<SessionKey>) {
+        self.states.retain(|key, _| live.contains(key));
+        self.pending_link
+            .lock()
+            .expect("lock pending Markdown link")
+            .take();
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_session_count(&self) -> usize {
+        self.states.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn markdown_update_count(&self) -> usize {
+        self.markdown_set_text_calls
+    }
+
+    #[cfg(test)]
+    pub(super) fn markdown_source(&self, id: &str, cx: &App) -> String {
+        self.states
+            .get(&self.session)
+            .and_then(|state| state.markdown.get(&format!("model:{id}")))
+            .expect("current Markdown state")
+            .read(cx)
+            .rendered_text()
+            .source()
+            .to_string()
+    }
+
+    pub(super) fn remeasure(&mut self, cx: &mut Context<Self>) {
+        for state in self.states.values() {
+            state.scroller.update(cx, MessageScrollerState::remeasure);
+        }
+    }
+
+    pub(super) fn timeline_focus(&self, item_id: Option<&str>, _: &App) -> Option<FocusHandle> {
+        let state = self.states.get(&self.session)?;
+        item_id
+            .and_then(|id| {
+                id.strip_prefix("tool:")
+                    .or(Some(id))
+                    .and_then(|id| state.tool_focus.get(id))
+            })
+            .cloned()
+            .or_else(|| Some(self.focus.clone()))
+    }
+
+    fn jump_to_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.states.get(&self.session) else {
+            return;
+        };
+        let offset = state.scroller.read(cx).logical_scroll_top();
+        let item_id = state.item_ids.get(offset.item_ix).cloned();
+        let tool_id = item_id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("tool:"))
+            .map(str::to_owned);
+        let focus = tool_id
+            .as_ref()
+            .and_then(|id| state.tool_focus.get(id))
+            .cloned()
+            .unwrap_or_else(|| self.focus.clone());
+        state.scroller.update(cx, |scroller, cx| {
+            scroller.scroll_to_end(cx);
+        });
+        // The jump button may disappear after this update; move focus before
+        // notifying the view so it never remains on a hidden control.
+        focus.focus(window, cx);
+        let mut anchor =
+            FocusAnchor::new(MainView::Session(self.session.clone()), Region::Timeline);
+        if let Some(tool_id) = tool_id {
+            anchor = anchor.with_item(tool_id);
+        }
+        if let Some(parent) = self.parent.upgrade() {
+            parent.update(cx, |parent, cx| parent.note_focus(anchor, cx));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn reveal_tool(
+        &mut self,
+        call_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(state) = self.states.get_mut(&self.session) else {
+            return false;
+        };
+        let stable_id = format!("tool:{call_id}");
+        let Some(index) = state.item_ids.iter().position(|id| id == &stable_id) else {
+            return false;
+        };
+        let Some(focus) = state.tool_focus.get(call_id).cloned() else {
+            return false;
+        };
+        state.open_tools.insert(call_id.to_owned());
+        state.scroller.update(cx, |scroller, cx| {
+            scroller.scroll_to_item(index, cx);
+        });
+        focus.focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    fn toggle_tool(&mut self, call_id: &str, open: bool, cx: &mut Context<Self>) {
+        let anchor = FocusAnchor::new(MainView::Session(self.session.clone()), Region::Timeline)
+            .with_item(call_id.to_owned());
+        if let Some(parent) = self.parent.upgrade() {
+            parent.update(cx, |parent, cx| parent.note_focus(anchor, cx));
+        }
+        if let Some(state) = self.states.get_mut(&self.session) {
+            if open {
+                state.open_tools.insert(call_id.to_owned());
+            } else {
+                state.open_tools.remove(call_id);
+            }
+            cx.notify();
+        }
+    }
+}
+
+impl Render for SessionTimeline {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = self
+            .parent
+            .upgrade()
+            .expect("timeline owner is alive")
+            .read(cx)
+            .theme
+            .resolved()
+            .clone();
+        let Some(state) = self.states.get(&self.session) else {
+            return div();
+        };
+        let scroller = state.scroller.clone();
+        let items = Rc::clone(&self.items);
+        let markdown = state.markdown.clone();
+        let tool_focus = state.tool_focus.clone();
+        let open_tools = state.open_tools.clone();
+        let entity = cx.entity().clone();
+        let pending_link = Arc::clone(&self.pending_link);
+        let show_jump = scroller.read(cx).is_scrolled_up();
+        let timeline = MessageScroller::new(
+            format!("session-timeline:{}", session_id(&self.session)),
+            scroller,
+            move |index, window, cx| {
+                let item = items[index].clone();
+                render_item(
+                    item,
+                    &entity,
+                    &markdown,
+                    &tool_focus,
+                    &open_tools,
+                    &pending_link,
+                    &tokens,
+                    window,
+                    cx,
+                )
+            },
+        )
+        .jump_button(false)
+        .size_full();
+        let pending = self
+            .pending_link
+            .lock()
+            .expect("lock pending Markdown link")
+            .clone();
+        let close_link = Arc::clone(&self.pending_link);
+        div()
+            .relative()
+            .size_full()
+            .track_focus(&self.focus)
+            .child(timeline)
+            .when(show_jump, |this| {
+                this.child(
+                    div().absolute().bottom(px(12.)).right(px(12.)).child(
+                        Button::new("jump-to-latest")
+                            .label("Jump to latest")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.jump_to_latest(window, cx);
+                            })),
+                    ),
+                )
+            })
+            .children(pending.map(|target| {
+                LinkConfirmation::new(target).on_close(move |window, _| {
+                    close_link
+                        .lock()
+                        .expect("lock pending Markdown link")
+                        .take();
+                    window.refresh();
+                })
+            }))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_item(
+    item: TimelineItem,
+    entity: &Entity<SessionTimeline>,
+    markdown: &BTreeMap<String, Entity<TextViewState>>,
+    tool_focus: &BTreeMap<String, FocusHandle>,
+    open_tools: &BTreeSet<String>,
+    pending_link: &Arc<Mutex<Option<String>>>,
+    tokens: &ResolvedTokens,
+    _window: &mut Window,
+    _cx: &mut App,
+) -> gpui_kit::AnyElement {
+    match item {
+        TimelineItem::User { id, text } => div()
+            .id(format!("user-message-row-{id}"))
+            .test_support()
+            .flex()
+            .w_full()
+            .justify_end()
+            .child(
+                div()
+                    .id(format!("user-message-{id}"))
+                    .test_support()
+                    .max_w(relative(0.8))
+                    .rounded_lg()
+                    .bg(tokens.projected.selection)
+                    .text_color(tokens.projected.foreground)
+                    .px_3()
+                    .py_2()
+                    .child(Label::new(text.as_ref())),
+            )
+            .into_any_element(),
+        TimelineItem::Model { id, .. } => {
+            let key = format!("model:{id}");
+            let Some(state) = markdown.get(&key) else {
+                return div().into_any_element();
+            };
+            let pending_link = Arc::clone(pending_link);
+            AgentMarkdown::new(state)
+                .on_confirmation(move |target, window, _| {
+                    *pending_link.lock().expect("lock pending Markdown link") = Some(target);
+                    window.refresh();
+                })
+                .into_any_element()
+        }
+        TimelineItem::Tool(call) => {
+            let call_id = call.key.call_id.clone();
+            let open = open_tools.contains(&call_id);
+            let focus = tool_focus
+                .get(&call_id)
+                .cloned()
+                .expect("ToolCall focus is installed with its projection");
+            let toggle_entity = entity.clone();
+            let toggle_id = call_id.clone();
+            let on_toggle = move |open: bool, _: &mut Window, cx: &mut App| {
+                toggle_entity.update(cx, |timeline, cx| {
+                    timeline.toggle_tool(&toggle_id, open, cx);
+                });
+            };
+            ToolCallView {
+                call,
+                open,
+                focus,
+                tokens: tokens.clone(),
+                on_toggle: Rc::new(on_toggle),
+            }
+            .into_any_element()
+        }
+    }
+}
+
+type ToolToggleHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+#[derive(gpui_kit::IntoElement)]
+struct ToolCallView {
+    call: ToolCallProjection,
+    open: bool,
+    focus: FocusHandle,
+    tokens: ResolvedTokens,
+    on_toggle: ToolToggleHandler,
+}
+
+impl RenderOnce for ToolCallView {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let call = self.call;
+        let call_id = call.key.call_id.clone();
+        let execution_label = match call.execution {
+            ExecutionState::NotExecuted | ExecutionState::Succeeded => None,
+            ExecutionState::Running => Some("Running"),
+            ExecutionState::Failed => Some("Failed"),
+            ExecutionState::Stopped => Some("Stopped"),
+            ExecutionState::Unknown => Some("Unknown"),
+        };
+        let approval_label = match call.approval {
+            ApprovalState::NotRequested
+            | ApprovalState::Pending
+            | ApprovalState::Submitting
+            | ApprovalState::Decided(ApprovalDecision::AllowOnce) => None,
+            ApprovalState::Decided(ApprovalDecision::Reject) => Some("Rejected"),
+            ApprovalState::Stale => Some("Stale"),
+        };
+        let summary = [execution_label, approval_label]
+            .into_iter()
+            .flatten()
+            .fold(
+                format!("{} {}", call.title, call.arguments),
+                |summary, label| format!("{summary} · {label}"),
+            );
+        let output = Label::new(
+            call.output
+                .map_or("No output reported.".to_owned(), |output| {
+                    format!("Output\n{output}")
+                }),
+        );
+        let body = div()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .bg(self.tokens.metis.code_surface)
+            .text_color(self.tokens.metis.foreground_secondary)
+            .text_size(self.tokens.projected.mono_font_size)
+            .when(
+                matches!(
+                    call.approval,
+                    ApprovalState::Pending | ApprovalState::Submitting | ApprovalState::Stale
+                ),
+                |body| {
+                    body.child(format!("Arguments\n{}", call.arguments))
+                        .children(call.cwd.clone().map(|cwd| Label::new(format!("cwd {cwd}"))))
+                        .children(
+                            call.reason
+                                .clone()
+                                .map(|reason| Label::new(reason.as_ref())),
+                        )
+                },
+            )
+            .child(output);
+        let disclosure = super::super::disclosure::Disclosure::new(
+            format!("tool-{call_id}"),
+            self.open,
+            self.focus,
+        )
+        .summary(summary)
+        .body(body)
+        .on_toggle(move |open, window, cx| (self.on_toggle)(open, window, cx));
+        div()
+            .id(format!("tool-call-{call_id}"))
+            .flex_col()
+            .border_l_1()
+            .border_color(self.tokens.projected.border)
+            .child(disclosure)
+            .into_any_element()
+    }
+}

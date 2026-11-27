@@ -2,14 +2,21 @@
 //! processes: mocking the supervisor would not verify pipe closure, process
 //! groups, job objects, or descendant cleanup.
 
+mod support;
+
 use std::{
     env, fs,
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
+};
+
+#[cfg(unix)]
+use support::fixture_runtime_config;
+use support::{
+    TestDirectory, approval_runtime_config, create_session_at, real_dsh_entrypoint, runtime_config,
 };
 
 use metis::{
@@ -700,25 +707,6 @@ fn run_real_crash_fixture_parent() {
     }
 }
 
-fn runtime_config(directory: &TestDirectory, host_entrypoint: PathBuf) -> DshRuntimeConfig {
-    DshRuntimeConfig {
-        metis_executable: PathBuf::from(env!("CARGO_BIN_EXE_metis")),
-        node_executable: PathBuf::from("node"),
-        host_entrypoint,
-        home: directory.path.join("dsh-home"),
-        startup_timeout: Duration::from_secs(30),
-        shutdown_timeout: Duration::from_secs(15),
-    }
-}
-
-fn real_dsh_entrypoint() -> PathBuf {
-    workspace_root().join("packages/metis-host/lib/host.js")
-}
-
-fn approval_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
-    fixture_runtime_config(directory, "approval-fixture.js")
-}
-
 #[cfg(unix)]
 fn restart_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
     fixture_runtime_config(directory, "restart-fixture.js")
@@ -727,28 +715,6 @@ fn restart_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
 #[cfg(target_os = "linux")]
 fn unresponsive_runtime_config(directory: &TestDirectory) -> DshRuntimeConfig {
     fixture_runtime_config(directory, "unresponsive-host-fixture.js")
-}
-
-fn fixture_runtime_config(directory: &TestDirectory, fixture: &str) -> DshRuntimeConfig {
-    let config = runtime_config(directory, real_dsh_entrypoint());
-    fs::create_dir_all(&config.home).expect("create fixture DSH_HOME");
-    let fixture = workspace_root()
-        .join("packages/metis-host/test")
-        .join(fixture);
-    let fixture = fixture.to_string_lossy().replace('\'', "''");
-    fs::write(
-        config.home.join("cordis.patch.yml"),
-        format!("- insert:\n    - id: metis-test-fixture\n      name: '{fixture}'\n"),
-    )
-    .expect("write fixture home patch");
-    config
-}
-
-fn workspace_root() -> PathBuf {
-    // Deliberately not canonicalized: on Windows `canonicalize` returns a
-    // verbatim `\\?\` path, which Node's module loader reduces to the bare
-    // drive root and rejects with EISDIR.
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn read_pid(path: &Path) -> u32 {
@@ -975,39 +941,6 @@ impl Drop for ProcessGuard {
     }
 }
 
-static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
-
-struct TestDirectory {
-    path: PathBuf,
-}
-
-impl TestDirectory {
-    fn new(name: &str) -> Self {
-        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let path = env::temp_dir().join(format!(
-            "metis-runtime-{name}-{}-{sequence}",
-            std::process::id()
-        ));
-        if path.exists() {
-            fs::remove_dir_all(&path).expect("remove stale test directory");
-        }
-        fs::create_dir_all(&path).expect("create isolated test directory");
-        Self { path }
-    }
-
-    fn write(&self, name: &str, contents: &str) -> PathBuf {
-        let path = self.path.join(name);
-        fs::write(&path, contents).expect("write test fixture");
-        path
-    }
-}
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
 fn bash_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -1024,17 +957,6 @@ fn run_git(project: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-async fn create_session_at(client: &DshClient, directory: &Path) -> String {
-    let project = client
-        .open_project(&directory.to_string_lossy())
-        .await
-        .expect("open Session project");
-    client
-        .create_session(&project.project_id)
-        .await
-        .expect("create project-attached Session")
 }
 
 async fn next_stream_frame(stream: &mut DshStream) -> serde_json::Value {
@@ -1299,6 +1221,21 @@ async fn project_and_git_workflows_use_real_host() {
         .await
         .expect("read project file");
     assert_eq!(file, "before\n");
+    client
+        .write_project_file(&opened.project_id, "tracked.txt", "written by Host\n")
+        .await
+        .expect("write existing project file");
+    assert_eq!(
+        client
+            .read_project_file(&opened.project_id, "tracked.txt")
+            .await
+            .expect("read Host-written project file"),
+        "written by Host\n"
+    );
+    client
+        .write_project_file(&opened.project_id, "tracked.txt", "before\n")
+        .await
+        .expect("restore project fixture through Host");
     let session_id = client
         .create_session(&opened.project_id)
         .await
@@ -1319,7 +1256,19 @@ async fn project_and_git_workflows_use_real_host() {
             matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
             "unexpected path escape error: {error}"
         );
+        let error = client
+            .write_project_file(&opened.project_id, path, "changed\n")
+            .await
+            .expect_err("project write escapes must be rejected");
+        assert!(
+            matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
+            "unexpected write escape error: {error}"
+        );
     }
+    assert_eq!(
+        fs::read_to_string(&outside).expect("read outside fixture"),
+        "outside\n"
+    );
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&outside, project.join("outside-link.txt"))
@@ -1331,6 +1280,18 @@ async fn project_and_git_workflows_use_real_host() {
         assert!(
             matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
             "unexpected symlink escape error: {error}"
+        );
+        let error = client
+            .write_project_file(&opened.project_id, "outside-link.txt", "changed\n")
+            .await
+            .expect_err("external symlink writes must be rejected");
+        assert!(
+            matches!(error, ClientError::Remote { ref code, .. } if code == "project/path-outside"),
+            "unexpected symlink write error: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside).expect("read outside fixture"),
+            "outside\n"
         );
     }
 
@@ -1437,6 +1398,30 @@ async fn project_and_git_workflows_use_real_host() {
     assert!(
         matches!(error, ClientError::Remote { ref code, .. } if code == "project/read-failed"),
         "unexpected oversized-file error: {error}"
+    );
+    let error = client
+        .write_project_file(&opened.project_id, "tracked.txt", &"x".repeat(513 * 1024))
+        .await
+        .expect_err("oversized writes must be rejected");
+    assert!(
+        matches!(error, ClientError::Remote { ref code, .. } if code == "project/write-failed"),
+        "unexpected oversized-write error: {error}"
+    );
+    let error = client
+        .write_project_file(&opened.project_id, "missing.txt", "missing\n")
+        .await
+        .expect_err("writes must not silently create missing files");
+    assert!(
+        matches!(error, ClientError::Remote { ref code, .. } if code == "project/write-failed"),
+        "unexpected missing-file write error: {error}"
+    );
+    let error = client
+        .write_project_file(&opened.project_id, "nested", "not a file\n")
+        .await
+        .expect_err("writes must reject non-regular files");
+    assert!(
+        matches!(error, ClientError::Remote { ref code, .. } if code == "project/write-failed"),
+        "unexpected non-file write error: {error}"
     );
 
     #[cfg(unix)]

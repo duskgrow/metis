@@ -12,6 +12,7 @@
 - New crate: `just new-crate <name>`
 - Dependency policy: `just deny`; docs build: `just doc`; release-artifact drift check: `just dist-check`; agent-doc smoke check: `just agent-check`
 - Headless package / extracted-archive smoke: `just headless-package` / `just headless-smoke`
+- Opt-in Workbench performance acceptance: `just perf-workbench` (release, single-thread; not part of `just ci`)
 - Toolchain bump: `just toolchain-bump` (also run weekly by CI, which opens a validated PR)
 
 ## Environment
@@ -31,6 +32,7 @@
 - `code-simplification` — behavior-preserving dedup/dead-code/abstraction cleanup, always as its own change
 - `explain-diff` — maintainer-facing rich HTML walkthrough of a change + in-chat quiz, for reading large diffs
 - `release-review` — the human-gate checklist for merging a release-plz Release PR
+- `workbench-ui` — proportional UI/UX process: no brief for local changes, at most one page for new reusable or cross-surface patterns
 
 Done = `just ci` green + the `pr-preflight` checklist clean.
 
@@ -53,4 +55,5 @@ Done = `just ci` green + the `pr-preflight` checklist clean.
 - Commit messages: modified Conventional Commits — `type(scope): subject`, lowercase type/scope, pure-ASCII English subject, header ≤ 100 chars, blank line before body/footer (`fix`→PATCH, `feat`→MINOR, `!`→MAJOR). Enforced at the commit-msg hook and by the PR CI check (SSOT: the `check-commit` subcommand of `crates/xtask`); merge strategy is squash-only with the PR title+body landing as the commit message — the PR title must obey the same rules, and the body is landable as a whole (CI rejects HTML comments, task lists, bare `---` lines, and prose paragraphs over 7 lines — split or use lists).
 - Product documentation is Chinese-first: documents under `docs/` are written directly in Chinese. For the external-facing README and CONTRIBUTING portals, `*.zh-CN.md` is canonical and the English counterpart is a translation — update the Chinese version first. Code, commit messages, and agent operational instructions remain English.
 - Product documentation is for users and developers, not a specification: lead with distinctive user outcomes, include only what code cannot express, and describe the current state without obvious feature inventories, defensive repetition, change history, or negative restatements of removed features (review procedure: the `doc-maintenance` skill).
+- Workbench product UI changes use the `workbench-ui` level that matches their scope: local changes need no design brief; new reusable or cross-surface patterns need at most a one-page brief (review gate: `pr-preflight`; this judgment rule is not machine-enforced).
 - Docs co-evolve in the same PR as the behavior change. A rule you needed but couldn't find is a missing rule: add it via the `rule-maintenance` skill in that PR, instead of re-deriving it next session.

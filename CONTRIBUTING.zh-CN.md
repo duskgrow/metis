@@ -98,6 +98,7 @@ changelog 由提交信息生成并按模块分组：commit 的 scope（`feat(cli
 | ------------------------------ | -------------------------------------------------------------------------------------- |
 | `ci.yml` → quality-gate        | `prek run --all-files`，与本地 git 钩子同源                                            |
 | `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                               |
+| `native-editor.yml`            | 每晚定时／手动触发，在 PR 外验收 Ubuntu 24.04 原生 Wayland 输入、像素与系统剪贴板      |
 | `ci.yml` → test (windows)      | rustup 原生路线，消费同一 `rust-toolchain.toml`                                        |
 | `commits.yml`                  | 对 PR 标题 + 正文做提交规范检查（即 squash 合并后的 commit message）；改标题会自动重跑 |
 | `pr-guard.yml`                 | PR diff 密钥扫描——硬失败，命中行直接标注在 PR 的 Files 页上                            |
@@ -135,7 +136,7 @@ gh api repos/{owner}/{repo} --jq '{allow_squash_merge, allow_merge_commit, allow
 
 ## 本地验证 CI（可选）
 
-CI 跑的每条命令本来就能本地复现（`just ci`、`prek run --all-files`、`just dist-check`）——这是设计使然。workflow YAML 本身由静态检查兜底：`just lint` 已含 actionlint。经评估后我们刻意放弃了编排层的动态重放（act/Docker 方案）：当任务层已是唯一事实源时，这点额外的仿真度不值 Docker 依赖的代价。
+CI 跑的每条命令本来就能本地复现（`just ci`、`prek run --all-files`、`just dist-check`、`just native-editor-smoke-ubuntu`，最后一个需要 Docker）——这是设计使然。workflow YAML 本身由静态检查兜底：`just lint` 已含 actionlint。经评估后我们刻意放弃了编排层的动态重放（act/Docker 方案）：当任务层已是唯一事实源时，这点额外的仿真度不值 Docker 依赖的代价。
 
 需要 secrets/OIDC 的 job（release-plz 发布、crates.io Trusted Publishing）*按设计*不能本地运行——它们的合并前验证缝是 Release PR 加上每个 PR 都会跑的 `dist plan`。
 

@@ -26,13 +26,14 @@ Metis 让个人用户在一个工作台中操作多台主机上的智能体，�
 - [x] 强制终止工作台后，本地扩展 dsh 与智能体均停止，再次启动创建新的运行时。
 - [x] 制作携带 Node.js、Harness、Metis 扩展和依赖的无显示最小运行包，确认其不包含 GUI 与 Tree-sitter 依赖。
 - [x] 在预装系统 Git 的干净 Ubuntu 24.04 无显示环境完成运行包安装、启动和真实项目的 Git 调用。
-- [ ] 在预装系统 Git 的干净 NixOS 无显示环境完成运行包安装、启动和真实项目的 Git 调用。
+- [x] 在预装系统 Git 的干净 NixOS 无显示环境完成运行包安装、启动和真实项目的 Git 调用。
 
 **GPUI Kit 界面**
 
-- [ ] 在 Ubuntu 24.04 与 NixOS 的 Wayland 或 X11 会话中，使用可用的 Vulkan 驱动和已配置的中文输入法，验证组合输入、候选提交、中文显示和复制粘贴。
-- [ ] 连续追加流式 Markdown，确认文本与代码块正确更新；位于底部时自动跟随，向上滚动后保持阅读位置。
-- [ ] 使用 Editor 完成代码高亮、编辑和保存；将真实 Git 工作区 patch 交给 Diff，验证新增、修改、删除、重命名及 Unified/Split 视图。
+- [x] 在 Ubuntu 24.04 与 NixOS 的隔离 Wayland 会话中，使用 Mesa lavapipe Vulkan 和外部 Fcitx5，验证组合输入、候选提交、中文显示和系统剪贴板复制粘贴。
+- [x] 连续追加流式 Markdown，确认文本与代码块正确更新；位于底部时自动跟随，向上滚动后保持阅读位置。
+- [x] 使用 Editor 完成代码高亮、编辑和保存。
+- [x] 将真实 Git 工作区 patch 交给 Diff，验证新增、修改、删除、重命名及 Unified/Split 视图。
 
 **客户端接入**
 
@@ -41,6 +42,26 @@ Metis 让个人用户在一个工作台中操作多台主机上的智能体，�
 - [x] 验证主机接口认证与项目路径边界，拒绝未授权调用及项目范围外的文件和 Git 操作。
 
 ### 里程碑 1：本地可用
+
+工作台体验与设计边界见[工作台体验](workbench-experience.md)，原生组件职责与验证顺序见[工作台原生组件契约](workbench-component-contracts.md)，外部依据与后续验证方法见[UI/UX 调研](research/workbench-uiux.md)，日常变更流程见 [`workbench-ui`](../.agents/skills/workbench-ui/SKILL.md)。
+
+**当前状态与交付顺序**
+
+当前切片已完成纯行为模型、Light/Dark 主题写路径、Markdown 安全适配、Disclosure、Session headless 纵切、未绑定产品键位的 `FocusTopology`、Host 快照与有序事件的纯投影适配、Host 异步传输与 UI 线程桥接、Queue 的本地排队与空闲派发，以及产品入口的本地冷启动；已有行为测试、headless probes、局部 Session 真实帧审查和真实 Host 提示词／审批闭环集成测试通过。原型固化收尾已完成，但这些局部成果不代表完整原生流程已经接通。
+
+[Workbench 产品入口](../crates/metis/src/main.rs)在后台启动私有 Host，打开启动时所在目录并创建 Session，再通过桥接用真实事件更新原生投影；窗口关闭时依次清理传输与 Host。启动失败保持 Offline 并显示错误。当前尚无添加或选择项目的原生流程，也不会自动重连；交互 preview 仍只由 [Session 测试](../crates/metis/src/workbench/session/tests.rs)注入投影和 effect，不是产品运行模式。
+
+Host 投影尚未提供模型与 effort，产品 Composer 继续显示 Model unavailable，原生 Send、Queue 与队列派发因此在产品中都不可用；队列派发只沿普通提示词路径提交文本，模型与 effort 不会传到 Host，不能把传输层提示词测试扩大解释为原生提示词主流程已经完成。当前原生 Worktree Diff 已从 Session Header 发起真实 Host `git/diff` 请求，并呈现 Unified/Split patch、离线、空改动与错误状态；Diff/Subagent 的完整原生视觉与 OS 验收仍未完成，Subagent transcript 也尚未进入 Host 投影。下一步由 Host 侧模型目录接通模型与 effort 选择，完善添加／选择项目到差异审查的完整冷启动，最后进行 OS/性能验收。工程接手入口、保留偏差和验证边界由上文组件契约持有。
+
+**设计准备**
+
+- [x] 建立轻量 UI 变更流程，明确体验语义、主题边界和评审分级。
+- [ ] 完成首个高保真设计切片，贯穿冷启动、环境准备、添加项目、会话、流式输出、审批和差异审查，覆盖真实内容与启动失败、无效目录、重连等状态。
+- [ ] 根据切片提取最小语义令牌、基础组件、产品组件和动作规则，完成浅色、深色与高对比验证。
+- [ ] 完成主题写路径、中文与文本缩放、键盘分栏、真实辅助技术、不可信 Markdown、有界历史投影、流式与大文件性能，以及受控视觉测试等关键探针。
+- [ ] 通过形成性用户测试验证停止误操作、拒绝危险行动、恢复连接和审查改动等核心任务，再扩大实现。
+
+**本地工作流**
 
 - 一次启动即可使用完整工作台。
 - 添加、打开项目，编辑文件并审查差异。

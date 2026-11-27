@@ -100,6 +100,7 @@ Don't want to release yet? Just don't merge — the Release PR accumulates and u
 | ------------------------------ | ---------------------------------------------------------------------------------------------------- |
 | `ci.yml` → quality-gate        | `prek run --all-files`, same source as local git hooks                                               |
 | `ci.yml` → test (ubuntu/macos) | `nix develop -c just ci`                                                                             |
+| `native-editor.yml`            | Nightly/manual native Wayland input, pixel and system clipboard acceptance outside PR checks         |
 | `ci.yml` → test (windows)      | native rustup route, same `rust-toolchain.toml`                                                      |
 | `commits.yml`                  | commit-convention check on the PR title + body (the squash-merge commit message); re-runs on retitle |
 | `pr-guard.yml`                 | secret scan of the PR diff — hard fail, the hit is annotated on the PR's Files tab                   |
@@ -137,7 +138,7 @@ gh api repos/{owner}/{repo} --jq '{allow_squash_merge, allow_merge_commit, allow
 
 ## Validating CI locally (optional)
 
-Every command CI runs is already locally reproducible (`just ci`, `prek run --all-files`, `just dist-check`) — that is by design. The workflow YAML itself is statically checked: `just lint` includes actionlint. Dynamic replay of the orchestration (e.g. with act/Docker) was evaluated and deliberately rejected: the added fidelity doesn't justify the Docker dependency when the task layer is already the single source of truth.
+Every command CI runs is already locally reproducible (`just ci`, `prek run --all-files`, `just dist-check`, `just native-editor-smoke-ubuntu`; the last needs Docker) — that is by design. The workflow YAML itself is statically checked: `just lint` includes actionlint. Dynamic replay of the orchestration (e.g. with act/Docker) was evaluated and deliberately rejected: the added fidelity doesn't justify the Docker dependency when the task layer is already the single source of truth.
 
 Jobs needing secrets/OIDC (release-plz publish, crates.io Trusted Publishing) cannot run locally _by design_ — their pre-merge seam is the Release PR plus `dist plan` on every PR.
 
