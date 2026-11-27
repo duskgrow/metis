@@ -24,4 +24,10 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - uses: DeterminateSystems/update-flake-lock@da03c0f078bc4b2c37ee4f7e072d34bf8f188bb3 # v29
         with:
+          # Recurrent updates replace the title/body on an existing PR. Keep
+          # review notes in comments rather than relying on body edits.
           pr-title: "chore(deps): update flake.lock"
+          pr-body: |
+            Update the locked flake inputs. Use the lockfile diff as the authoritative record of the resolved inputs.
+
+            CI does not start automatically when the default GITHUB_TOKEN creates the PR. Close and reopen it or push a follow-up commit, then require green quality gates before merging.
