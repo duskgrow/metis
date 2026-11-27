@@ -418,6 +418,157 @@ fn session_controller_first_focus_and_overlay_return_are_pure_intents() {
 }
 
 #[gpui_kit::test]
+fn worktree_diff_loads_host_patch_and_returns_focus_to_its_entry(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    cx.update(|window, cx| window.click("worktree-diff", cx));
+    settle(&mut cx);
+    let request_id = match intents.borrow().as_slice() {
+        [
+            SessionIntent::GitDiff {
+                request_id,
+                worktree,
+            },
+        ] => {
+            assert_eq!(worktree, &session("one").worktree);
+            *request_id
+        }
+        intents => panic!("expected one Worktree diff request, got {intents:?}"),
+    };
+    assert!(view.read_with(&cx, |view, _| matches!(
+        view.controller.as_ref().unwrap().navigation.current_view(),
+        MainView::Diff { .. }
+    )));
+
+    let patch = concat!(
+        "diff --git a/example.txt b/example.txt\n",
+        "index 1111111..2222222 100644\n",
+        "--- a/example.txt\n",
+        "+++ b/example.txt\n",
+        "@@ -1 +1 @@\n",
+        "-before\n",
+        "+after\n",
+    );
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.apply_git_diff_result(
+                GitDiffResult {
+                    request_id,
+                    result: Ok(patch.to_owned()),
+                },
+                cx,
+            );
+        });
+    });
+    settle(&mut cx);
+
+    let diff_state = view.read_with(&cx, |view, cx| {
+        view.diff_review
+            .as_ref()
+            .expect("DiffReview")
+            .read(cx)
+            .state()
+    });
+    cx.update(|window, cx| {
+        assert!(window.find("worktree-diff-content").visible());
+        let mut file = window.within(("diff-file", 0_usize));
+        assert!(
+            file.find("collapse-file")
+                .label()
+                .is_some_and(|label| label.contains("example.txt"))
+        );
+        assert_eq!(
+            file.within(("old", 0_usize)).find("source").label(),
+            Some("before")
+        );
+        assert_eq!(
+            file.within(("new", 0_usize)).find("source").label(),
+            Some("after")
+        );
+        window.click("diff-split", cx);
+    });
+    settle(&mut cx);
+    assert_eq!(
+        diff_state.read_with(&cx, |state, _| state.mode()),
+        gpui_kit::component::diff::DiffMode::Split
+    );
+
+    cx.update(|window, cx| window.click("return-to-session", cx));
+    settle(&mut cx);
+    assert!(view.read_with(&cx, |view, _| matches!(
+        view.controller.as_ref().unwrap().navigation.current_view(),
+        MainView::Session(_)
+    )));
+    cx.update(|window, _| {
+        assert_eq!(window.find("worktree-diff").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn empty_worktree_diff_is_marked_stale_after_host_disconnect(cx: &mut TestAppContext) {
+    let (handle, view, intents) = open_preview(cx, preview());
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+    cx.update(|window, cx| window.click("worktree-diff", cx));
+    settle(&mut cx);
+    let request_id = match intents.borrow().as_slice() {
+        [SessionIntent::GitDiff { request_id, .. }] => *request_id,
+        intents => panic!("expected a Worktree diff request, got {intents:?}"),
+    };
+
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.apply_git_diff_result(
+                GitDiffResult {
+                    request_id,
+                    result: Ok(String::new()),
+                },
+                cx,
+            );
+        });
+    });
+    settle(&mut cx);
+    cx.update(|window, _| assert!(window.find("worktree-diff-empty").visible()));
+
+    let mut offline = preview();
+    offline.connection = ConnectionState::Offline;
+    replace(&mut cx, &view, offline);
+    cx.update(|window, _| {
+        assert!(window.find("worktree-diff-empty").visible());
+        assert!(window.find("worktree-diff-stale").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn offline_worktree_diff_is_explicit_and_sends_no_request(cx: &mut TestAppContext) {
+    let mut projection = preview();
+    projection.connection = ConnectionState::Offline;
+    let (handle, view, intents) = open_preview(cx, projection);
+    let mut cx = visual(handle, cx);
+    settle(&mut cx);
+
+    cx.update(|window, cx| window.click("worktree-diff", cx));
+    settle(&mut cx);
+    cx.update(|window, _| {
+        assert!(window.find("worktree-diff-offline").visible());
+        assert!(window.find("worktree-diff-page").visible());
+    });
+    assert!(intents.borrow().is_empty());
+
+    cx.update(|window, cx| window.click("return-to-session", cx));
+    settle(&mut cx);
+    cx.update(|window, _| {
+        assert_eq!(window.find("worktree-diff").focused(), Some(true));
+    });
+    assert!(view.read_with(&cx, |view, _| matches!(
+        view.controller.as_ref().unwrap().navigation.current_view(),
+        MainView::Session(_)
+    )));
+}
+
+#[gpui_kit::test]
 fn session_send_records_intent_without_clearing_draft_or_faking_host(cx: &mut TestAppContext) {
     let (handle, view, intents) = open_preview(cx, preview());
     let mut cx = visual(handle, cx);

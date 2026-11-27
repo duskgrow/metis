@@ -5,7 +5,7 @@
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use metis::{
-    client::ApprovalOutcome,
+    client::{ApprovalOutcome, ClientResult},
     session_transport::{TransportCommand, TransportEvent},
 };
 use tokio::sync::mpsc;
@@ -22,6 +22,11 @@ const NOTICE_LIMIT: usize = 8;
 const NOTICE_TEXT_BYTES: usize = 2 * 1024;
 const NOTICE_TOTAL_BYTES: usize = 4 * 1024;
 
+pub(super) struct GitDiffResult {
+    pub(super) request_id: u64,
+    pub(super) result: ClientResult<String>,
+}
+
 pub(super) struct HostSessionBridge {
     session: SessionKey,
     reducer: HostSessionReducer,
@@ -35,6 +40,8 @@ pub(super) struct HostSessionBridge {
     failed: bool,
     dirty: bool,
     notices: VecDeque<String>,
+    pending_git_diff: Option<u64>,
+    git_diff_result: Option<GitDiffResult>,
 }
 
 impl HostSessionBridge {
@@ -54,6 +61,8 @@ impl HostSessionBridge {
             failed: false,
             dirty: false,
             notices: VecDeque::new(),
+            pending_git_diff: None,
+            git_diff_result: None,
         }
     }
 
@@ -77,6 +86,10 @@ impl HostSessionBridge {
         self.notices.drain(..).collect()
     }
 
+    pub(super) fn take_git_diff_result(&mut self) -> Option<GitDiffResult> {
+        self.git_diff_result.take()
+    }
+
     #[cfg(test)]
     pub(super) fn cursor(&self) -> Option<i64> {
         self.reducer.cursor()
@@ -94,6 +107,8 @@ impl HostSessionBridge {
     fn apply(&mut self, event: TransportEvent) {
         match event {
             TransportEvent::Connected { client_id } => {
+                self.pending_git_diff = None;
+                self.git_diff_result = None;
                 self.generation += 1;
                 self.reducer.replace_generation(self.generation, client_id);
                 self.connection = ConnectionState::Online;
@@ -108,6 +123,7 @@ impl HostSessionBridge {
                     Ok(()) => self.dirty = true,
                     Err(error) => {
                         self.failed = true;
+                        self.pending_git_diff = None;
                         self.connection = ConnectionState::Offline;
                         self.dirty = true;
                         self.push_notice(format!(
@@ -129,6 +145,7 @@ impl HostSessionBridge {
                     }
                 }
             }
+
             TransportEvent::CommandFailed {
                 operation,
                 error,
@@ -139,7 +156,14 @@ impl HostSessionBridge {
                     "{operation} was not completed by the Host{request}: {error}"
                 ));
             }
+            TransportEvent::GitDiff { request_id, result } => {
+                if self.pending_git_diff == Some(request_id) {
+                    self.pending_git_diff = None;
+                    self.git_diff_result = Some(GitDiffResult { request_id, result });
+                }
+            }
             TransportEvent::Closed { reason } => {
+                self.pending_git_diff = None;
                 self.connection = ConnectionState::Offline;
                 self.dirty = true;
                 if let Some(error) = reason {
@@ -172,6 +196,18 @@ impl HostSessionBridge {
                     text,
                 }
             }
+            SessionIntent::GitDiff {
+                request_id,
+                worktree,
+            } => {
+                if worktree != self.session.worktree {
+                    return EffectResult::Unavailable;
+                }
+                TransportCommand::GitDiff {
+                    request_id,
+                    project_id: self.session.worktree.project.project_id.clone(),
+                }
+            }
             SessionIntent::Approval {
                 call,
                 decision,
@@ -190,10 +226,18 @@ impl HostSessionBridge {
                 }
             }
         };
-        match self.commands.try_send(command) {
-            Ok(()) => EffectResult::Recorded,
-            Err(_) => EffectResult::Unavailable,
+        let diff_request = match &command {
+            TransportCommand::GitDiff { request_id, .. } => Some(*request_id),
+            _ => None,
+        };
+        if self.commands.try_send(command).is_err() {
+            return EffectResult::Unavailable;
         }
+        if let Some(request_id) = diff_request {
+            self.pending_git_diff = Some(request_id);
+            self.git_diff_result = None;
+        }
+        EffectResult::Recorded
     }
 
     fn push_notice(&mut self, mut notice: String) {
@@ -395,6 +439,69 @@ mod tests {
         assert_eq!(session.title, "Host session");
         assert_eq!(session.generation, 1);
         assert!(fixture.bridge.borrow_mut().poll().is_none());
+    }
+
+    #[test]
+    fn git_diff_is_worktree_scoped_and_ignores_stale_results() {
+        let mut fixture = fixture();
+        connect(&fixture);
+        fixture.bridge.borrow_mut().poll();
+
+        let worktree = session_key().worktree;
+        assert_eq!(
+            send_intent(
+                &fixture,
+                SessionIntent::GitDiff {
+                    request_id: 7,
+                    worktree: WorktreeKey::new(
+                        ProjectKey::new("host", "other-project"),
+                        "worktree",
+                    ),
+                }
+            ),
+            EffectResult::Unavailable
+        );
+        assert_eq!(
+            send_intent(
+                &fixture,
+                SessionIntent::GitDiff {
+                    request_id: 7,
+                    worktree,
+                }
+            ),
+            EffectResult::Recorded
+        );
+        assert!(matches!(
+            fixture.commands.try_recv(),
+            Ok(TransportCommand::GitDiff { request_id: 7, project_id })
+                if project_id == "project"
+        ));
+
+        send(
+            &fixture,
+            TransportEvent::GitDiff {
+                request_id: 6,
+                result: Ok("stale patch".to_owned()),
+            },
+        );
+        fixture.bridge.borrow_mut().poll();
+        assert!(fixture.bridge.borrow_mut().take_git_diff_result().is_none());
+
+        send(
+            &fixture,
+            TransportEvent::GitDiff {
+                request_id: 7,
+                result: Ok("current patch".to_owned()),
+            },
+        );
+        fixture.bridge.borrow_mut().poll();
+        let result = fixture
+            .bridge
+            .borrow_mut()
+            .take_git_diff_result()
+            .expect("matching Git Diff result");
+        assert_eq!(result.request_id, 7);
+        assert_eq!(result.result.expect("successful patch"), "current patch");
     }
 
     #[test]

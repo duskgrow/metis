@@ -51,7 +51,7 @@ Metis 让个人用户在一个工作台中操作多台主机上的智能体，�
 
 [Workbench 产品入口](../crates/metis/src/main.rs)在后台启动私有 Host，打开启动时所在目录并创建 Session，再通过桥接用真实事件更新原生投影；窗口关闭时依次清理传输与 Host。启动失败保持 Offline 并显示错误。当前尚无添加或选择项目的原生流程，也不会自动重连；交互 preview 仍只由 [Session 测试](../crates/metis/src/workbench/session/tests.rs)注入投影和 effect，不是产品运行模式。
 
-Host 投影尚未提供模型与 effort，因此产品 Composer 继续显示 Model unavailable，不能把传输层提示词测试扩大解释为原生提示词主流程已经完成。下一阶段完成 Diff/Subagent 原生 UI、Queue 的真实 Host 提交和模型选择，打通添加项目到差异审查的完整冷启动，最后进行 OS/性能验收。工程接手入口、保留偏差和验证边界由上文组件契约持有。
+Host 投影尚未提供模型与 effort，因此产品 Composer 继续显示 Model unavailable，不能把传输层提示词测试扩大解释为原生提示词主流程已经完成。当前原生 Worktree Diff 已从 Session Header 发起真实 Host `git/diff` 请求，并呈现 Unified/Split patch、离线、空改动与错误状态；Diff/Subagent 的完整原生视觉与 OS 验收仍未完成，Subagent transcript 也尚未进入 Host 投影。下一步接通 Queue 的真实 Host 提交和模型选择，完善添加／选择项目到差异审查的完整冷启动，最后进行 OS/性能验收。工程接手入口、保留偏差和验证边界由上文组件契约持有。
 
 **设计准备**
 

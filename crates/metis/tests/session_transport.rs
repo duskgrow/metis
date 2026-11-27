@@ -5,6 +5,7 @@ mod support;
 
 use std::{
     fs,
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -30,12 +31,20 @@ struct TransportFixture {
 
 fn approval_transport(name: &str) -> TransportFixture {
     let directory = TestDirectory::new(name);
+    start_transport(directory, true)
+}
+
+fn start_transport(directory: TestDirectory, approval_fixture: bool) -> TransportFixture {
     // Product cold start owns project opening and Session creation; transport
     // tests start from that same prepared state rather than duplicating setup.
     let local = LocalSession::start(
         &DshSupervisor::system(),
         &LocalSessionConfig {
-            runtime: approval_runtime_config(&directory),
+            runtime: if approval_fixture {
+                approval_runtime_config(&directory)
+            } else {
+                runtime_config(&directory, real_dsh_entrypoint())
+            },
             client: DshClientConfig::default(),
             project_path: directory.path.clone(),
         },
@@ -138,6 +147,108 @@ fn wait_until(mut predicate: impl FnMut() -> bool, what: &str) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[test]
+fn real_host_git_diff_round_trips_success_and_project_errors() {
+    let directory = TestDirectory::new("git-diff-transport");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(["--no-pager", "--no-optional-locks"])
+            .args(args)
+            .current_dir(&directory.path)
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("run Git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.name", "Metis Git Diff Test"]);
+    git(&["config", "user.email", "metis@example.invalid"]);
+    fs::write(directory.path.join("tracked.txt"), "before\n").expect("write tracked file");
+    git(&["add", "tracked.txt"]);
+    git(&["commit", "--quiet", "-m", "initial"]);
+    fs::write(directory.path.join("tracked.txt"), "after\n").expect("modify tracked file");
+
+    let mut fixture = start_transport(directory, false);
+    expect_connected(&mut fixture);
+    next_follow_frame(
+        &mut fixture.events,
+        fixture.transport.wake(),
+        |frame| frame.get("type").and_then(serde_json::Value::as_str) == Some("snapshot"),
+        "the opening snapshot",
+    );
+    let project_id = fixture.local.project().project_id.clone();
+    fixture
+        .transport
+        .commands()
+        .try_send(TransportCommand::GitDiff {
+            request_id: 11,
+            project_id: project_id.clone(),
+        })
+        .expect("request the project diff");
+    loop {
+        match next_event(
+            &mut fixture.events,
+            fixture.transport.wake(),
+            "Git diff result",
+        ) {
+            TransportEvent::GitDiff {
+                request_id: 11,
+                result: Ok(patch),
+            } => {
+                assert!(patch.contains("diff --git a/tracked.txt b/tracked.txt"));
+                assert!(patch.contains("-before"));
+                assert!(patch.contains("+after"));
+                break;
+            }
+            TransportEvent::GitDiff { request_id, result } => {
+                panic!("unexpected diff result for {request_id}: {result:?}");
+            }
+            TransportEvent::CommandFailed {
+                operation, error, ..
+            } => panic!("{operation} failed: {error}"),
+            TransportEvent::Closed { reason } => panic!("transport closed: {reason:?}"),
+            _ => {}
+        }
+    }
+
+    fixture
+        .transport
+        .commands()
+        .try_send(TransportCommand::GitDiff {
+            request_id: 12,
+            project_id: "missing-project".to_owned(),
+        })
+        .expect("request an invalid project diff");
+    loop {
+        match next_event(
+            &mut fixture.events,
+            fixture.transport.wake(),
+            "Git diff error",
+        ) {
+            TransportEvent::GitDiff {
+                request_id: 12,
+                result: Err(_),
+            } => break,
+            TransportEvent::GitDiff { request_id, result } => {
+                panic!("unexpected diff result for {request_id}: {result:?}");
+            }
+            TransportEvent::Closed { reason } => panic!("transport closed: {reason:?}"),
+            _ => {}
+        }
+    }
+    fixture.transport.close_and_join();
+    fixture.local.shutdown().expect("stop Git Diff Host");
 }
 
 #[test]

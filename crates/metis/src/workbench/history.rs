@@ -9,15 +9,26 @@ use super::identity::{SessionKey, SubagentKey, WorktreeKey};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum MainView {
     Session(SessionKey),
-    #[allow(dead_code)] // Pure Diff routing is retained for the later native view.
     Diff {
         worktree: WorktreeKey,
         origin: SessionKey,
     },
-    #[allow(dead_code)] // Pure Subagent routing is retained for the later native view.
+    #[allow(dead_code)] // No native transcript source yet.
     Subagent {
         key: SubagentKey,
     },
+}
+
+impl MainView {
+    pub(super) fn source_session(&self) -> &SessionKey {
+        match self {
+            Self::Session(session)
+            | Self::Diff {
+                origin: session, ..
+            } => session,
+            Self::Subagent { key } => &key.parent,
+        }
+    }
 }
 
 /// Semantic regions; stable item IDs address entries inside a region.
@@ -232,7 +243,6 @@ impl NavigationState {
         self.navigate(MainView::Session(session), snapshot, None)
     }
 
-    #[cfg(test)]
     pub(super) fn open_diff(
         &mut self,
         worktree: WorktreeKey,
@@ -357,7 +367,7 @@ impl NavigationState {
         let focus = match (&self.current.view, target) {
             (MainView::Session(current), MainView::Diff { origin, .. }) if current == origin => {
                 Some(
-                    FocusAnchor::new(self.current.view.clone(), Region::Timeline)
+                    FocusAnchor::new(self.current.view.clone(), Region::Header)
                         .with_item(DIFF_ENTRY_ITEM_ID),
                 )
             }
@@ -557,7 +567,7 @@ mod tests {
             navigation.current_view(),
             &MainView::Session(parent.clone())
         );
-        assert_eq!(navigation.focus().region, Region::Timeline);
+        assert_eq!(navigation.focus().region, Region::Header);
         assert_eq!(
             navigation.focus().item_id.as_deref(),
             Some(DIFF_ENTRY_ITEM_ID)
@@ -624,7 +634,7 @@ mod tests {
             navigation.current_view(),
             &MainView::Session(parent.clone())
         );
-        assert_eq!(navigation.focus().region, Region::Timeline);
+        assert_eq!(navigation.focus().region, Region::Header);
         assert_eq!(
             navigation.focus().item_id.as_deref(),
             Some(DIFF_ENTRY_ITEM_ID)

@@ -687,7 +687,7 @@ mod tests {
 
         assert!(navigation.back(&snapshot));
         let source_anchor = navigation.focus().clone();
-        assert_shell(&source_anchor, Region::Timeline, Some(DIFF_ENTRY_ITEM_ID));
+        assert_shell(&source_anchor, Region::Header, Some(DIFF_ENTRY_ITEM_ID));
         let session_topology = FocusTopology::new(MainView::Session(parent), None, false);
         expect_focus(focus.restore(session_topology.clone(), source_anchor.clone()));
         assert_eq!(focus.rebuild(session_topology), FocusIntent::Noop);

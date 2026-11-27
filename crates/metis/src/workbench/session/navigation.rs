@@ -155,12 +155,7 @@ impl SessionNavigation {
         let owner = self.parent.upgrade().expect("navigation owner is alive");
         let (projection, selected) = {
             let owner = owner.read(cx);
-            (
-                owner.projection.clone(),
-                owner
-                    .current_projection()
-                    .map(|session| session.key.clone()),
-            )
+            (owner.projection.clone(), owner.source_session().cloned())
         };
         self.rebuild(&projection, selected.as_ref(), false, cx);
     }

@@ -1,6 +1,7 @@
-//! Minimal native Session slice with injected projections and honest effects.
+//! Native Workbench shell for Sessions and Worktree review.
 
 mod composer;
+mod diff_review;
 mod host_bridge;
 mod host_projection;
 mod navigation;
@@ -23,14 +24,16 @@ use gpui_kit::{
 use super::{
     focus::{FocusIntent, FocusReducer, FocusScope, FocusTarget, FocusTopology},
     history::{
-        ApprovalDecision, FocusAnchor, MainView, NavigationSnapshot, NavigationState, Region,
+        ApprovalDecision, DIFF_ENTRY_ITEM_ID, FocusAnchor, MainView, NavigationSnapshot,
+        NavigationState, Region,
     },
     identity::{ProjectKey, SessionKey, SubagentKey, ToolCallKey, WorktreeKey},
     stats::StatsInput,
     theme::{ResolvedTokens, ThemeController},
 };
 use composer::Composer;
-use host_bridge::HostSessionBridge;
+use diff_review::DiffReview;
+use host_bridge::{GitDiffResult, HostSessionBridge};
 use metis::{
     runtime::DshSupervisor,
     session_transport::{LocalSession, LocalSessionConfig, LocalSessionError, SessionTransport},
@@ -201,6 +204,10 @@ impl WorkbenchProjection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum SessionIntent {
+    GitDiff {
+        request_id: u64,
+        worktree: WorktreeKey,
+    },
     Send {
         session: SessionKey,
         text: String,
@@ -272,7 +279,7 @@ impl MainViewController {
         FocusTopology::new(view.clone(), approval, has_queue)
     }
 
-    fn current_session(&self) -> Option<&SessionKey> {
+    pub(super) fn current_session(&self) -> Option<&SessionKey> {
         match self.navigation.current_view() {
             MainView::Session(session) => Some(session),
             MainView::Diff { .. } | MainView::Subagent { .. } => None,
@@ -296,17 +303,20 @@ impl MainViewController {
     ) {
         self.snapshot = snapshot;
         let current = self.navigation.current_view().clone();
-        self.navigation.restore(current, &self.snapshot);
+        self.navigation.restore(current.clone(), &self.snapshot);
         self.navigation.prune(&self.snapshot);
         let session = self
             .current_session()
             .and_then(|key| projection.session(key));
         let topology = Self::topology_for(self.navigation.current_view(), session);
-        let intent = if self.focus.current().scope == FocusScope::Shell {
+        // Refreshing Host facts cannot move native focus out of a retained Diff.
+        let same_diff =
+            matches!(current, MainView::Diff { .. }) && &current == self.navigation.current_view();
+        let intent = if same_diff || self.focus.current().scope != FocusScope::Shell {
+            self.focus.rebuild(topology)
+        } else {
             self.focus
                 .restore(topology, self.navigation.focus().clone())
-        } else {
-            self.focus.rebuild(topology)
         };
         if intent != FocusIntent::Noop {
             self.pending_focus = Some(intent);
@@ -318,6 +328,18 @@ impl MainViewController {
             return false;
         }
         let topology = Self::topology_for(self.navigation.current_view(), Some(projection));
+        self.pending_focus = Some(
+            self.focus
+                .restore(topology, self.navigation.focus().clone()),
+        );
+        true
+    }
+
+    fn open_diff(&mut self, worktree: WorktreeKey) -> bool {
+        if !self.navigation.open_diff(worktree, &self.snapshot) {
+            return false;
+        }
+        let topology = Self::topology_for(self.navigation.current_view(), None);
         self.pending_focus = Some(
             self.focus
                 .restore(topology, self.navigation.focus().clone()),
@@ -426,6 +448,10 @@ pub(crate) struct Workbench {
     navigation: Entity<SessionNavigation>,
     timeline: Option<Entity<SessionTimeline>>,
     composer: Option<Entity<Composer>>,
+    diff_review: Option<Entity<DiffReview>>,
+    next_diff_request: u64,
+    diff_entry_focus: FocusHandle,
+    source_return_focus: FocusHandle,
     header_focus: FocusHandle,
     effects: EffectHandler,
     host: Option<ActiveHost>,
@@ -509,6 +535,10 @@ impl Workbench {
             navigation,
             timeline,
             composer,
+            diff_review: None,
+            next_diff_request: 0,
+            diff_entry_focus: cx.focus_handle(),
+            source_return_focus: cx.focus_handle(),
             header_focus: cx.focus_handle(),
             effects: Rc::clone(effects),
             host: None,
@@ -589,10 +619,18 @@ impl Workbench {
         let Some(host) = &self.host else {
             return;
         };
-        let (projection, notices) = {
+        let (projection, notices, diff_result) = {
             let mut bridge = host.bridge.borrow_mut();
-            (bridge.poll(), bridge.take_notices())
+            (
+                bridge.poll(),
+                bridge.take_notices(),
+                bridge.take_git_diff_result(),
+            )
         };
+        // A completed read remains available even if the next event closed the Host.
+        if let Some(result) = diff_result {
+            self.apply_git_diff_result(result, cx);
+        }
         if let Some(projection) = projection {
             self.status_notice = None;
             self.replace_projection(projection, window, cx);
@@ -610,6 +648,12 @@ impl Workbench {
 
     fn tokens(&self) -> ResolvedTokens {
         self.theme.resolved().clone()
+    }
+
+    fn source_session(&self) -> Option<&SessionKey> {
+        self.controller
+            .as_ref()
+            .map(|controller| controller.navigation.current_view().source_session())
     }
 
     fn current_projection(&self) -> Option<&SessionProjection> {
@@ -677,6 +721,7 @@ impl Workbench {
         if !controller.open_session(session, &projection) {
             return;
         }
+        self.diff_review = None;
         self.navigation.update(cx, |navigation, cx| {
             navigation.select_session(&self.projection, &projection.key, cx);
         });
@@ -694,6 +739,40 @@ impl Workbench {
         cx.notify();
     }
 
+    fn open_worktree_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(worktree) = self
+            .current_projection()
+            .map(|session| session.key.worktree.clone())
+        else {
+            return;
+        };
+        let Some(controller) = &mut self.controller else {
+            return;
+        };
+        if !controller.open_diff(worktree.clone()) {
+            return;
+        }
+
+        let request = (self.projection.connection == ConnectionState::Online).then(|| {
+            self.next_diff_request += 1;
+            let request_id = self.next_diff_request;
+            let effect = (self.effects.borrow_mut())(SessionIntent::GitDiff {
+                request_id,
+                worktree,
+            });
+            (request_id, effect)
+        });
+        self.diff_review = Some(cx.new(|cx| DiffReview::new(request, cx)));
+        self.apply_pending_focus(window, cx);
+        cx.notify();
+    }
+
+    fn apply_git_diff_result(&self, result: GitDiffResult, cx: &mut Context<Self>) {
+        if let Some(review) = &self.diff_review {
+            review.update(cx, |review, cx| review.complete(result, cx));
+        }
+    }
+
     fn return_to_origin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(controller) = &mut self.controller else {
             return;
@@ -701,6 +780,7 @@ impl Workbench {
         if !controller.return_to_origin(&self.projection) {
             return;
         }
+        self.diff_review = None;
         if let Some(projection) = self.current_projection().cloned() {
             if let Some(timeline) = &self.timeline {
                 timeline.update(cx, |timeline, cx| {
@@ -812,6 +892,19 @@ impl Workbench {
         cx.notify();
     }
 
+    fn sync_diff_connection(&mut self, cx: &mut Context<Self>) {
+        let showing_diff = self.controller.as_ref().is_some_and(|controller| {
+            matches!(controller.navigation.current_view(), MainView::Diff { .. })
+        });
+        if !showing_diff {
+            self.diff_review = None;
+        } else if self.projection.connection == ConnectionState::Offline
+            && let Some(review) = &self.diff_review
+        {
+            review.update(cx, DiffReview::disconnect);
+        }
+    }
+
     /// Replace Host facts while preserving native per-Session UI state.
     fn replace_projection(
         &mut self,
@@ -845,7 +938,7 @@ impl Workbench {
                 }
             });
         }
-        let previous_session = self.current_projection().map(|session| session.key.clone());
+        let previous_session = self.source_session().cloned();
         self.projection = projection;
         let live = self
             .projection
@@ -865,7 +958,7 @@ impl Workbench {
             } else {
                 self.controller = Some(MainViewController::new(first, snapshot));
             }
-            let selected = self.current_projection().map(|session| session.key.clone());
+            let selected = self.source_session().cloned();
             let reveal_selected = selected != previous_session;
             self.navigation.update(cx, |navigation, cx| {
                 navigation.replace_projection(
@@ -908,6 +1001,7 @@ impl Workbench {
                 navigation.replace_projection(&self.projection, None, false, cx);
             }
         });
+        self.sync_diff_connection(cx);
         if self.controller.is_some() {
             self.apply_pending_focus(window, cx);
         } else if !focus_header_after_close {
@@ -958,9 +1052,19 @@ impl Workbench {
             Region::Navigation => {
                 Some(ResolvedFocus::Tree(self.navigation.read(cx).tree_state(cx)))
             }
-            Region::Header | Region::SourceHeader | Region::DiffContent | Region::Transcript => {
-                Some(ResolvedFocus::Handle(self.header_focus.clone()))
+            Region::Header if target.anchor.item_id.as_deref() == Some(DIFF_ENTRY_ITEM_ID) => {
+                Some(ResolvedFocus::Handle(self.diff_entry_focus.clone()))
             }
+            Region::DiffContent => Some(ResolvedFocus::Handle(
+                self.diff_review
+                    .as_ref()
+                    .and_then(|review| review.read(cx).content_focus(cx))
+                    .unwrap_or_else(|| self.source_return_focus.clone()),
+            )),
+            Region::SourceHeader | Region::Transcript => {
+                Some(ResolvedFocus::Handle(self.source_return_focus.clone()))
+            }
+            Region::Header => Some(ResolvedFocus::Handle(self.header_focus.clone())),
             Region::Timeline => self.timeline.as_ref().and_then(|timeline| {
                 timeline
                     .read(cx)
@@ -1000,7 +1104,17 @@ impl Render for Workbench {
             .controller
             .as_ref()
             .map(|controller| controller.navigation.current_view().clone());
-        let current = self.current_projection().cloned();
+        let current = current_view
+            .as_ref()
+            .and_then(|view| {
+                let key = match view {
+                    MainView::Session(key) => key,
+                    MainView::Diff { origin, .. } => origin,
+                    MainView::Subagent { key } => &key.parent,
+                };
+                self.projection.session(key)
+            })
+            .cloned();
         let title = current
             .as_ref()
             .map_or("No Session selected", |session| session.title.as_str());
@@ -1093,6 +1207,22 @@ impl Render for Workbench {
                                                     .text_size(px(16.))
                                                     .child(title.to_owned()),
                                             )
+                                            .when(
+                                                matches!(current_view.as_ref(), Some(MainView::Session(_)))
+                                                    && current.is_some(),
+                                                |row| {
+                                                    row.child(
+                                                        Button::new("worktree-diff")
+                                                            .label("Review Diff")
+                                                            .track_focus(&self.diff_entry_focus)
+                                                            .on_click(cx.listener(
+                                                                |this, _, window, cx| {
+                                                                    this.open_worktree_diff(window, cx);
+                                                                },
+                                                            )),
+                                                    )
+                                                },
+                                            )
                                             .child(
                                                 Button::new("theme-toggle")
                                                     .label(if mode.is_dark() {
@@ -1178,9 +1308,36 @@ impl Render for Workbench {
                                                 .max_w(px(SESSION_CONTENT_WIDTH))
                                                 .child(composer),
                                         )
-                                })),
+                                }))
+                                .into_any_element(),
                         ),
-                        Some(MainView::Diff { .. } | MainView::Subagent { .. }) => Some(
+                        Some(MainView::Diff { .. }) => Some(
+                            div()
+                                .id("worktree-diff-page")
+                                .test_support()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .top(px(SESSION_HEADER_HEIGHT))
+                                .bottom_0()
+                                .flex()
+                                .flex_col()
+                                .p_4()
+                                .gap_3()
+                                .child(
+                                    Button::new("return-to-session")
+                                        .label("Return to Session")
+                                        .track_focus(&self.source_return_focus)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.return_to_origin(window, cx);
+                                        })),
+                                )
+                                .children(self.diff_review.clone().map(|review| {
+                                    div().flex_1().min_h_0().child(review)
+                                }))
+                                .into_any_element(),
+                        ),
+                        Some(MainView::Subagent { .. }) => Some(
                             div()
                                 .absolute()
                                 .left_0()
@@ -1188,12 +1345,13 @@ impl Render for Workbench {
                                 .top(px(SESSION_HEADER_HEIGHT))
                                 .bottom_0()
                                 .p_4()
-                                .child("This slice keeps Diff and Subagent as pure models only.")
-                                .child(Button::new("return-to-session").label("Return").on_click(
+                                .child("Subagent transcript is unavailable in this Host projection.")
+                                .child(Button::new("return-to-session").label("Return to Session").on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.return_to_origin(window, cx);
                                     }),
-                                )),
+                                ))
+                                .into_any_element(),
                         ),
                         None => Some(
                             div()
@@ -1211,7 +1369,8 @@ impl Render for Workbench {
                                         .child(self.status_notice.clone().unwrap_or_else(|| {
                                             SharedString::new_static("No Host is connected. No Session or execution is being simulated.")
                                         })),
-                                ),
+                                )
+                                .into_any_element(),
                         ),
                     }),
             )

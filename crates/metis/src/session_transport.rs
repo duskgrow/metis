@@ -362,6 +362,11 @@ pub enum TransportCommand {
         request: ApprovalRequest,
         outcome: ApprovalOutcome,
     },
+    /// Read the patch for a project already opened on this Host.
+    GitDiff {
+        request_id: u64,
+        project_id: String,
+    },
 }
 
 /// Ordered transport notifications. Frames retain the Host JSON unchanged.
@@ -379,6 +384,12 @@ pub enum TransportEvent {
         operation: &'static str,
         error: ClientError,
         request_id: Option<String>,
+    },
+    /// Completion of a project-scoped Git diff request, including rejection
+    /// by the bounded RPC queue.
+    GitDiff {
+        request_id: u64,
+        result: ClientResult<String>,
     },
     /// Terminal state: no further events follow. `reason` is `None` for an
     /// orderly local or Host-side close. After a local close the notification
@@ -549,6 +560,10 @@ trait SessionCommands: Send + 'static {
         request: &ApprovalRequest,
         outcome: ApprovalOutcome,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send;
+    fn git_diff(
+        &self,
+        project_id: &str,
+    ) -> impl std::future::Future<Output = ClientResult<String>> + Send;
     fn close(self) -> impl std::future::Future<Output = ()> + Send;
 }
 
@@ -568,6 +583,13 @@ impl SessionCommands for DshClient {
         outcome: ApprovalOutcome,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send {
         DshClient::answer(self, request, outcome)
+    }
+
+    fn git_diff(
+        &self,
+        project_id: &str,
+    ) -> impl std::future::Future<Output = ClientResult<String>> + Send {
+        DshClient::git_diff(self, project_id)
     }
 
     async fn close(self) {
@@ -722,18 +744,25 @@ async fn pump<F: FrameStream, E: EventStream>(
                     None => break None,
                     Some(command) => {
                         if let Err(full) = rpc_sender.try_send(command) {
-                            let command = full.into_inner();
-                            let (operation, request_id) = match command {
+                            let error = ClientError::CommandQueueFull;
+                            let event = match full.into_inner() {
                                 TransportCommand::Prompt { request_id, .. } => {
-                                    ("session/prompt", Some(request_id))
+                                    TransportEvent::CommandFailed {
+                                        operation: "session/prompt",
+                                        error,
+                                        request_id: Some(request_id),
+                                    }
                                 }
-                                TransportCommand::Answer { .. } => ("$events/result", None),
+                                TransportCommand::Answer { .. } => TransportEvent::CommandFailed {
+                                    operation: "$events/result",
+                                    error,
+                                    request_id: None,
+                                },
+                                TransportCommand::GitDiff { request_id, .. } => {
+                                    TransportEvent::GitDiff { request_id, result: Err(error) }
+                                }
                             };
-                            if outbox.publish(TransportEvent::CommandFailed {
-                                operation,
-                                error: ClientError::CommandQueueFull,
-                                request_id,
-                            }, close).await.is_err() {
+                            if outbox.publish(event, close).await.is_err() {
                                 break None;
                             }
                         }
@@ -804,29 +833,35 @@ async fn run_worker<C: SessionCommands>(
         let Some(command) = command else {
             break;
         };
-        let (operation, request_id, result) = match command {
-            TransportCommand::Prompt { request_id, text } => {
-                let result = client.prompt(&session_id, &request_id, &text).await;
-                ("session/prompt", Some(request_id), result)
-            }
-            TransportCommand::Answer { request, outcome } => (
-                "$events/result",
-                None,
-                client.answer(&request, outcome).await,
-            ),
-        };
-        if let Err(error) = result
-            && outbox
-                .publish(
-                    TransportEvent::CommandFailed {
-                        operation,
-                        error,
-                        request_id,
-                    },
-                    &mut close,
-                )
+        let event = match command {
+            TransportCommand::Prompt { request_id, text } => client
+                .prompt(&session_id, &request_id, &text)
                 .await
-                .is_err()
+                .err()
+                .map(|error| TransportEvent::CommandFailed {
+                    operation: "session/prompt",
+                    error,
+                    request_id: Some(request_id),
+                }),
+            TransportCommand::Answer { request, outcome } => {
+                client.answer(&request, outcome).await.err().map(|error| {
+                    TransportEvent::CommandFailed {
+                        operation: "$events/result",
+                        error,
+                        request_id: None,
+                    }
+                })
+            }
+            TransportCommand::GitDiff {
+                request_id,
+                project_id,
+            } => Some(TransportEvent::GitDiff {
+                request_id,
+                result: client.git_diff(&project_id).await,
+            }),
+        };
+        if let Some(event) = event
+            && outbox.publish(event, &mut close).await.is_err()
         {
             return;
         }
@@ -1047,6 +1082,18 @@ mod tests {
             }
         }
 
+        fn git_diff(
+            &self,
+            project_id: &str,
+        ) -> impl std::future::Future<Output = ClientResult<String>> + Send {
+            self.state
+                .lock()
+                .expect("fake state")
+                .calls
+                .push(format!("git-diff:{project_id}"));
+            async { Ok("diff --git a/a.txt b/a.txt".to_owned()) }
+        }
+
         async fn close(self) {
             self.state.lock().expect("fake state").closed = true;
         }
@@ -1121,6 +1168,40 @@ mod tests {
             ["prompt:id-1", "prompt:id-2", "answer:event-1"]
         );
         assert!(state.closed, "the worker closes the owned client");
+    }
+
+    #[tokio::test]
+    async fn worker_returns_git_diff_with_its_request_identity() {
+        let (commands, state) = FakeCommands::recording();
+        let (command_sender, command_receiver) = mpsc::channel(2);
+        let (outbox, mut events, _wake) = outbox_channels(2);
+        let (_close_sender, close) = watch::channel(false);
+        let worker = tokio::spawn(run_worker(
+            commands,
+            "session-1".to_owned(),
+            command_receiver,
+            outbox,
+            close,
+        ));
+        command_sender
+            .send(TransportCommand::GitDiff {
+                request_id: 7,
+                project_id: "project-1".to_owned(),
+            })
+            .await
+            .expect("send git diff request");
+        drop(command_sender);
+        worker.await.expect("worker finishes");
+
+        assert!(matches!(
+            events.try_recv(),
+            Ok(TransportEvent::GitDiff { request_id: 7, result: Ok(patch) })
+                if patch.contains("diff --git")
+        ));
+        assert_eq!(
+            state.lock().expect("fake state").calls,
+            ["git-diff:project-1"]
+        );
     }
 
     #[tokio::test]
