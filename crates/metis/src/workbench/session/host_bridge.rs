@@ -90,7 +90,7 @@ impl HostSessionBridge {
         self.git_diff_result.take()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn cursor(&self) -> Option<i64> {
         self.reducer.cursor()
     }

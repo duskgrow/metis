@@ -55,7 +55,7 @@ thread_local! {
     static COLD_START_RESULTS: Cell<usize> = const { Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn cold_start_result_count() -> usize {
     COLD_START_RESULTS.with(Cell::get)
 }

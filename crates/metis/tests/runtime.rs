@@ -13,9 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use support::fixture_runtime_config;
 use support::{
-    TestDirectory, approval_runtime_config, create_session_at, fixture_runtime_config,
-    real_dsh_entrypoint, runtime_config,
+    TestDirectory, approval_runtime_config, create_session_at, real_dsh_entrypoint, runtime_config,
 };
 
 use metis::{

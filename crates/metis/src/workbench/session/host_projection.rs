@@ -161,7 +161,7 @@ impl HostSessionReducer {
         &self.client_id
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn cursor(&self) -> Option<i64> {
         self.journal.cursor()
     }
