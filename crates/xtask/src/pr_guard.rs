@@ -73,10 +73,8 @@ fn staged() -> ExitCode {
 /// The CI half: scan `gh pr diff`; findings become GitHub Actions error
 /// annotations so the PR page itself shows what was hit and where.
 fn full(pr: Option<&str>) -> ExitCode {
-    let mut diff_args: Vec<&str> = vec!["pr", "diff"];
-    diff_args.extend(pr);
-    let diff = match gh(&diff_args) {
-        Ok(out) => out,
+    let diff = match pr_diff(pr) {
+        Ok(diff) => diff,
         Err(code) => return code,
     };
     let findings = scan_diff(&diff);
@@ -96,23 +94,71 @@ fn full(pr: Option<&str>) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// The single-diff endpoint refuses diffs over 20000 lines
+/// (`PullRequest.diff too_large`), which would leave the check permanently red
+/// on a large but legitimate PR. That refusal falls back to the paginated files
+/// endpoint: per-file patches are synthesized into the `+++ b/<path>` + hunk
+/// text the scanner expects. No `--- a/<path>` line is needed because the
+/// scanner only reads the new-side header and hunk offsets.
+fn pr_diff(pr: Option<&str>) -> Result<String, ExitCode> {
+    let mut args: Vec<&str> = vec!["pr", "diff"];
+    args.extend(pr);
+    match gh_output(&args) {
+        Ok(diff) => Ok(diff),
+        Err(stderr) if diff_too_large(&stderr) => {
+            eprintln!(
+                "pr-guard: gh pr diff refused the oversized diff; scanning per-file patches instead"
+            );
+            files_patch(pr)
+        }
+        Err(stderr) => {
+            eprintln!("error: gh {} failed: {stderr}", args.join(" "));
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+/// `gh pr view` resolves the PR number from a number, URL, or the current
+/// branch alike, so the files endpoint works for every accepted argument shape.
+fn files_patch(pr: Option<&str>) -> Result<String, ExitCode> {
+    let mut resolve: Vec<&str> = vec!["pr", "view"];
+    resolve.extend(pr);
+    resolve.extend(["--json", "number", "--jq", ".number"]);
+    let number = gh(&resolve)?;
+    let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{}/files", number.trim());
+    gh(&[
+        "api",
+        &endpoint,
+        "--paginate",
+        "--jq",
+        r#".[] | "+++ b/\(.filename)\n\(.patch // "")""#,
+    ])
+}
+
+/// The API error has no structured form in gh's output; match its text.
+fn diff_too_large(stderr: &str) -> bool {
+    stderr.contains("too_large") || stderr.contains("exceeded the maximum number of lines")
+}
+
 fn gh(args: &[&str]) -> Result<String, ExitCode> {
+    match gh_output(args) {
+        Ok(out) => Ok(out),
+        Err(stderr) => {
+            eprintln!("error: gh {} failed: {stderr}", args.join(" "));
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+/// Raw stderr travels back so callers can distinguish the API's oversized-diff
+/// refusal from real failures.
+fn gh_output(args: &[&str]) -> Result<String, String> {
     match Command::new("gh").args(args).output() {
         Ok(output) if output.status.success() => {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         }
-        Ok(output) => {
-            eprintln!(
-                "error: gh {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            Err(ExitCode::from(2))
-        }
-        Err(err) => {
-            eprintln!("error: cannot run gh (needed for the PR diff): {err}");
-            Err(ExitCode::from(2))
-        }
+        Ok(output) => Err(String::from_utf8_lossy(&output.stderr).into_owned()),
+        Err(err) => Err(format!("cannot run gh: {err}")),
     }
 }
 
@@ -344,6 +390,25 @@ mod tests {
 
     fn paths(findings: &[Finding]) -> Vec<&str> {
         findings.iter().map(|f| f.pattern).collect()
+    }
+
+    #[test]
+    fn recognizes_the_oversized_diff_refusal() {
+        let oversized = "could not find pull request diff: HTTP 406: Sorry, the diff \
+                        exceeded the maximum number of lines (20000)\nPullRequest.diff too_large";
+        assert!(diff_too_large(oversized));
+        assert!(!diff_too_large("HTTP 404: Not Found"));
+    }
+
+    #[test]
+    fn scans_synthesized_per_file_patches() {
+        // the files-endpoint fallback has no `--- a/<path>` line
+        let token = format!("ghp_{}", "z".repeat(30));
+        let diff = format!("+++ b/src/f.txt\n@@ -1,1 +1,2 @@\n ctx\n+{token}\n");
+        let findings = scan_diff(&diff);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].path, "src/f.txt");
+        assert_eq!(findings[0].new_line, Some(2));
     }
 
     #[test]
