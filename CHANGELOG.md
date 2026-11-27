@@ -11,3 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      release heading leak into the Release PR body. -->
 
 ## [Unreleased]
+## [0.1.0](https://github.com/duskgrow/metis/releases/tag/v0.1.0) - 2026-11-27
+### Features
+- integrate dsh sessions, projects, and recovery ([#5](https://github.com/duskgrow/metis/pull/5))
+- add workbench shell with private dsh host ([#4](https://github.com/duskgrow/metis/pull/4))
+### Host
+- Add portable headless runtime and package ([#6](https://github.com/duskgrow/metis/pull/6))
+### Other
+- initialize metis workspace
+### Workbench
+- add the native Session and component probes ([#10](https://github.com/duskgrow/metis/pull/10))
