@@ -52,6 +52,7 @@ lint: _js-install
 test: _js-install
     pnpm --filter @metis/dsh-host test
     node --test scripts/check-js-licenses.test.mjs
+    node --test scripts/normalize-dependabot-pr.test.mjs
     node --test scripts/prune-production.test.mjs
     cargo nextest run --workspace --all-targets
     cargo nextest run -p metis --no-default-features --test cli
@@ -100,6 +101,11 @@ agent-check:
 # toolchain-update workflow wraps this in a validated PR; requires curl.
 toolchain-bump:
     cargo run -q -p xtask -- bump-toolchain
+
+# Normalize a newly opened Dependabot PR body without overwriting later edits.
+# The dependabot-pr.yml workflow is the CI caller (base checkout, gh + GH_TOKEN).
+normalize-dependabot-pr:
+    node scripts/normalize-dependabot-pr.mjs
 
 # Secret scan of a PR's diff (added lines): token / private-key / .env shapes,
 # hard fail. The pr-guard.yml workflow is the CI caller (needs gh + GH_TOKEN);
